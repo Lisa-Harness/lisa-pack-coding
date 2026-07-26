@@ -26,3 +26,6 @@ dev = [
 
 [project.entry-points."lisa.extensions.content_roots"]
 coding = "lisa_packs.coding:get_content_root"
+
+[project.entry-points."lisa.extensions.host_commands"]
+coding-copilot = "lisa_packs.coding.copilot_commands:get_host_commands"
