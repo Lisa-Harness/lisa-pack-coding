@@ -1,5 +1,5 @@
 tool_id: coding_status
 pack_id: lisa-pack-coding
-description: "Inspect Git diff and configured-check state for an owned coding worktree."
+description: "Inspect bounded Git diff, check diagnostics, and durable state for an owned coding worktree."
 mode_allowlist: [coding]
 effect: read

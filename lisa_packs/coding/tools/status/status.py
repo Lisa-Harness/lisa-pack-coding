@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
-
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.workflow import (
@@ -12,6 +10,7 @@ from lisa_packs.coding.workflow import (
     load_owned_artifact,
     run_git,
 )
+from pydantic import BaseModel, Field
 
 TOOL_ID = "coding_status"
 
@@ -36,9 +35,13 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         worktree = artifact_worktree(artifact, config=config)
         status = await run_git(worktree, ("status", "--short"), config=config)
         diff_stat = await run_git(worktree, ("diff", "--stat"), config=config)
-        if status.return_code != 0 or diff_stat.return_code != 0:
+        diff = await run_git(worktree, ("diff", "--no-ext-diff"), config=config)
+        if status.return_code != 0 or diff_stat.return_code != 0 or diff.return_code != 0:
             raise CodingWorkflowError(
-                status.stderr.strip() or diff_stat.stderr.strip() or "git status failed"
+                status.stderr.strip()
+                or diff_stat.stderr.strip()
+                or diff.stderr.strip()
+                or "git status failed"
             )
     except (CodingWorkflowError, OSError, ValueError) as exc:
         return ToolResult(tool_id=TOOL_ID, error=str(exc))
@@ -58,10 +61,19 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             "pushed_sha": artifact.pushed_sha,
             "git_status": status.stdout.strip() or "(clean)",
             "git_diff_stat": diff_stat.stdout.strip() or "(no diff)",
+            "git_diff": diff.stdout,
+            "git_diff_truncated": diff.output_truncated,
             "checks": {
                 check_id: {
                     "status": record.status,
                     "revision": record.revision,
+                    "argv": record.argv,
+                    "stdout": record.stdout,
+                    "stderr": record.stderr,
+                    "duration_ms": record.duration_ms,
+                    "completed_at": record.completed_at.isoformat()
+                    if record.completed_at
+                    else None,
                 }
                 for check_id, record in artifact.checks.items()
             },

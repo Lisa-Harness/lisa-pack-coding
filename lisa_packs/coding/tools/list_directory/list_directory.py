@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
-
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.local_files import (
     CodingPathError,
     excluded_relative_path,
     relative_path,
-    resolve_relative_path,
+    resolve_relative_path_at_root,
 )
+from lisa_packs.coding.workflow import CodingWorkflowError, readable_root
+from pydantic import BaseModel, Field
 
 TOOL_ID = "coding_list_directory"
 
@@ -19,6 +19,7 @@ TOOL_ID = "coding_list_directory"
 class Parameters(BaseModel):
     """Structured directory listing request."""
 
+    artifact_id: str | None = Field(default=None, min_length=1, max_length=100)
     path: str = Field(default="", description="Relative workspace directory, or empty for root.")
     max_entries: int = Field(default=100, ge=1, le=1000)
 
@@ -29,8 +30,8 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     params = Parameters.model_validate(ctx.parameters)
     try:
         config = get_coding_config(ctx)
-        root = config.resolve_workspace_root()
-        directory = resolve_relative_path(config, params.path, allow_root=True)
+        root = await readable_root(ctx, artifact_id=params.artifact_id, config=config)
+        directory = resolve_relative_path_at_root(root, params.path, allow_root=True)
         if not directory.is_dir():
             return ToolResult(tool_id=TOOL_ID, error="Requested path is not a directory.")
         limit = min(params.max_entries, config.max_directory_entries)
@@ -53,7 +54,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             )
             if len(entries) >= limit:
                 break
-    except (CodingPathError, OSError, ValueError) as exc:
+    except (CodingPathError, CodingWorkflowError, OSError, ValueError) as exc:
         return ToolResult(tool_id=TOOL_ID, error=str(exc))
 
     return ToolResult(

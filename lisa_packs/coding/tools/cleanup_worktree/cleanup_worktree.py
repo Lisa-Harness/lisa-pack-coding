@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
-
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.workflow import (
@@ -12,6 +10,7 @@ from lisa_packs.coding.workflow import (
     load_owned_artifact,
     run_git,
 )
+from pydantic import BaseModel, Field
 
 TOOL_ID = "coding_cleanup_worktree"
 
@@ -42,8 +41,8 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         )
         if removed.return_code != 0:
             raise CodingWorkflowError(
-                removed.stderr.strip()
-                or "git worktree remove failed; commit or revert changes first"
+                "git worktree remove failed: "
+                + (removed.stderr.strip() or "commit or revert changes first")
             )
         artifact.status = "cleaned"
         await ctx.code_change_artifact_store.save(artifact)

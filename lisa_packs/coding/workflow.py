@@ -23,6 +23,7 @@ __all__ = [
     "changed_paths",
     "load_owned_artifact",
     "patch_paths",
+    "readable_root",
     "run_git",
     "run_process",
 ]
@@ -181,6 +182,20 @@ async def load_owned_artifact(
     if require_worktree:
         artifact_worktree(artifact, config=config)
     return artifact
+
+
+async def readable_root(
+    ctx: ToolExecutionContext,
+    *,
+    artifact_id: str | None,
+    config: CodingPackConfig,
+) -> Path:
+    """Return the source root or a validated owned worktree for read operations."""
+
+    if artifact_id is None:
+        return config.resolve_workspace_root()
+    artifact = await load_owned_artifact(ctx, artifact_id=artifact_id, config=config)
+    return artifact_worktree(artifact, config=config)
 
 
 def artifact_branch_is_allowed(artifact: CodeChangeArtifact, config: CodingPackConfig) -> bool:

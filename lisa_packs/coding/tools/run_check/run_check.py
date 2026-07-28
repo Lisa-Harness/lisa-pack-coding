@@ -5,8 +5,6 @@ from __future__ import annotations
 import time
 from datetime import UTC, datetime
 
-from pydantic import BaseModel, Field
-
 from kernel.code_artifacts import CodeCheckRecord, CodeCheckStatus
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import get_coding_config
@@ -16,6 +14,7 @@ from lisa_packs.coding.workflow import (
     load_owned_artifact,
     run_process,
 )
+from pydantic import BaseModel, Field
 
 TOOL_ID = "coding_run_check"
 
@@ -50,18 +49,18 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             max_output_bytes=config.max_command_output_bytes,
         )
         elapsed = time.perf_counter() - started
-        status: CodeCheckStatus = "passed" if result.return_code == 0 else "failed"
+        status: CodeCheckStatus = (
+            "timed_out" if result.timed_out else "passed" if result.return_code == 0 else "failed"
+        )
         record = CodeCheckRecord(
             check_id=check.id,
             status=status,
             revision=artifact.revision,
-            return_code=result.return_code,
+            argv=list(check.argv),
+            duration_ms=round(elapsed * 1000),
             stdout=result.stdout,
             stderr=result.stderr,
-            timed_out=result.timed_out,
-            output_truncated=result.output_truncated,
-            elapsed_seconds=round(elapsed, 3),
-            finished_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
         )
         artifact.checks[check.id] = record
         await ctx.code_change_artifact_store.save(artifact)

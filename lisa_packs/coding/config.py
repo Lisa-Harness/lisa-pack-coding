@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
 from kernel.models import ToolExecutionContext
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 __all__ = ["CodingCheck", "CodingPackConfig", "get_coding_config"]
 

@@ -15,6 +15,7 @@ __all__ = [
     "read_text_file",
     "relative_path",
     "resolve_relative_path",
+    "resolve_relative_path_at_root",
 ]
 
 _EXCLUDED_PARTS = frozenset(
@@ -44,7 +45,22 @@ def resolve_relative_path(
 ) -> Path:
     """Resolve a non-excluded relative path without allowing traversal or symlink escape."""
 
-    root = config.resolve_workspace_root()
+    return resolve_relative_path_at_root(
+        config.resolve_workspace_root(),
+        requested_path,
+        allow_root=allow_root,
+    )
+
+
+def resolve_relative_path_at_root(
+    root: Path,
+    requested_path: str,
+    *,
+    allow_root: bool = False,
+) -> Path:
+    """Resolve a non-excluded relative path below a trusted workspace root."""
+
+    root = root.resolve()
     raw = requested_path.strip()
     if not raw or raw == ".":
         if allow_root:
