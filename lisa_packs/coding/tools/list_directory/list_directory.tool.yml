@@ -4,3 +4,8 @@ description: "List bounded non-generated entries in the source workspace or an o
 mode_allowlist: [coding]
 effect: read
 max_calls_per_turn: 30
+# One-line abbreviation returned when the model re-lists the same
+# directory within a single turn. Reuses the tool's own output_text
+# ("Listed N entries.") so the count is preserved without duplicating
+# the list contents in the message history.
+abbreviation_template: "{output_text} (already listed this turn; see prior result)"
