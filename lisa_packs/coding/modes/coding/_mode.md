@@ -25,6 +25,8 @@ routing_intent_keywords:
     - pull request
   review:
     - code review
+    - review code
+    - review the code
     - audit
     - check
     - inspect
@@ -45,6 +47,7 @@ allowed_tool_ids:
   - coding_read_copilot_customizations
   - github_open_pull_request
 tools_authoritative: true
+required_capabilities: [tools, code]
 ---
 
 # Coding
@@ -63,6 +66,59 @@ outlines, repository customizations, and source history available through the
 authorized tools. Answer with concrete paths and behavior, state uncertainty
 plainly, and recommend the smallest next step. Do not create a worktree,
 patch files, run checks, commit, push, or open a pull request.
+
+Read-heavy work (reviews, audits, spec drafting) burns the turn token budget
+fast: every `coding_read_file` and `coding_list_directory` result accumulates
+in-context and is re-sent on every subsequent iteration. Treat the budget as
+finite. The discipline below keeps the in-context footprint small and
+externalizes progress into your response text so a budget exhaustion or
+iteration cap never loses the index of what you examined.
+
+### Read discipline
+
+Apply this to every read path (Ask, Plan, and pre-edit inspection in
+Execute). The goal is the smallest in-context footprint that still answers
+the question.
+
+1. **Outline before reading.** Call `coding_outline_source` first when the
+   file is Python or TypeScript/JavaScript. Outlines return only line numbers
+   and declaration names — a full map for a few hundred tokens. Use the
+   outline to pick the narrow line window you actually need, not the whole
+   file.
+2. **Read the narrowest window.** Default `start_line`/`end_line` is 200
+   lines; the cap is 400. Read only the span the outline or search pointed
+   at. If you need more, extend by one window at a time, not by re-reading
+   from line 1.
+3. **Maintain a Read Catalog in your running response.** After each read,
+   append one line to a `## Read Catalog` section you keep in your response
+   text:
+
+   ```plaintext
+   - `path:START-END` — one-line summary of what this span contains
+   ```
+
+   The catalog is your durable index. It lives in your response, not in raw
+   tool output, so it survives any context compaction. Before re-reading a
+   path, check the catalog — if the span you need is already summarized,
+   reference it instead of re-reading.
+4. **Never re-read the same span.** If you already read `foo.py:1-200`, do
+   not call `coding_read_file` for `foo.py:1-200` again. If you need a
+   different span of the same file, read only the new span and add a new
+   catalog line.
+5. **Search before listing.** `coding_search_code` returns bounded matches
+   with line numbers; `coding_list_directory` returns up to 200 entries.
+   Prefer search to target specific files; use listing only once per
+   directory to orient, then note the result in the catalog.
+
+### Review and spec writing
+
+For reviews, audits, and spec drafting (read-only work that produces a
+document), accumulate findings in your response text as you go, grouped by
+file or theme, alongside the Read Catalog. Do not hold the whole review in
+context and write it at the end — if the turn hits a budget or iteration
+cap, the in-response findings are what survive. When the review is
+complete, hand off to `markdown` mode to render it as a durable document.
+Do not create a worktree or apply a patch to write a review.
 
 ## Plan
 
