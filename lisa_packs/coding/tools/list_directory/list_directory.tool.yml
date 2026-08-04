@@ -3,7 +3,7 @@ pack_id: lisa-pack-coding
 description: "List bounded non-generated entries in the source workspace or an owned artifact worktree."
 mode_allowlist: [coding]
 effect: read
-max_calls_per_turn: 30
+max_calls_per_turn: 50
 # One-line abbreviation returned when the model re-lists the same
 # directory within a single turn. Reuses the tool's own output_text
 # ("Listed N entries.") so the count is preserved without duplicating

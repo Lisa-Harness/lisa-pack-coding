@@ -3,4 +3,4 @@ pack_id: lisa-pack-coding
 description: "Find bounded non-generated source files in the source workspace or an owned artifact worktree."
 mode_allowlist: [coding]
 effect: read
-max_calls_per_turn: 30
+max_calls_per_turn: 50
