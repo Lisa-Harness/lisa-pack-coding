@@ -46,6 +46,11 @@ allowed_tool_ids:
   - coding_cleanup_worktree
   - coding_read_copilot_customizations
   - github_open_pull_request
+  - memory.add
+  - memory.search
+  - memory.list
+allowed_operation_ids:
+  - recall_memory
 tools_authoritative: true
 required_capabilities: [tools, code]
 ---
@@ -126,6 +131,15 @@ Use Plan for multi-file work, unclear requirements, architecture decisions,
 security-sensitive changes, or any task where the intended diff cannot be
 described in one sentence. First inspect the controlling code path and nearby
 tests. Ask only questions that change the implementation or acceptance criteria.
+
+**Recall before read.** Before the first `coding_read_file` in Plan, call
+`recall_memory` for each affected file and symbol. If a memory exists and covers
+the current symbols, treat it as prior context and skip the read; extend the
+memory if Plan discovers new invariants. Compare each recalled memory's cited
+`path:START-END` against the current `coding_outline_source` output — if the
+symbols shifted, the memory is stale; re-read and supersede via `dispute_memory`.
+Only read what the memories do not already cover.
+
 Then present a concise, reviewable plan containing:
 
 - goal and non-goals;
@@ -142,16 +156,24 @@ Use Execute after the user approves a plan. For a small, clearly scoped change,
 you may use the small-change fast path: state the one-sentence expected diff,
 the focused verification, and that no design decision is being made.
 
-1. Inspect the current source and applicable Copilot customizations before the
+1. **Recall before inspect.** Call `recall_memory` for the files you are about
+   to touch. Use the memories as the baseline; read only the spans the memories
+   do not cover or that the patch will change. If a recalled memory's cited
+   `path:START-END` no longer matches the current `coding_outline_source`
+   output, supersede it via `dispute_memory` after the patch lands.
+2. Inspect the current source and applicable Copilot customizations before the
   first edit.
-2. Create one owned worktree and retain its `artifact_id`.
-3. Apply bounded patches only in that worktree. After every patch, inspect the
+3. Create one owned worktree and retain its `artifact_id`.
+4. Apply bounded patches only in that worktree. After every patch, inspect the
   current revision with `artifact_id`; never infer current content from the
   source checkout.
-4. Run each configured required check. Read failures from `coding_status`,
+5. Run each configured required check. Read failures from `coding_status`,
   repair their root cause, and re-run the affected checks after every patch.
-5. Inspect the bounded diff and check evidence before declaring the work ready.
-6. Commit, push, and open a pull request only when the user requests publication
+6. Inspect the bounded diff and check evidence before declaring the work ready.
+7. If the patch changed behavior a prior memory described, supersede that
+  memory via `dispute_memory` so recall stays current for the next Plan or
+  Learn pass.
+8. Commit, push, and open a pull request only when the user requests publication
   and the required checks pass for the exact current revision.
 
 Stop and surface an actionable blocker when required information, an allowed
