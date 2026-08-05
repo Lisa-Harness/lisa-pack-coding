@@ -24,6 +24,9 @@ routing_intent_keywords:
     - walk me through
     - explain
     - map the code
+    - analyze
+    - analyse
+    - study
   comprehension:
     - trace
     - follow the flow
