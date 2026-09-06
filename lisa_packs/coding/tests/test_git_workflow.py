@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from hosts.core.code_artifacts import FileCodeChangeArtifactStore
+from host.code_artifacts import FileCodeChangeArtifactStore
 from kernel.models import ToolExecutionContext
 
 from lisa_packs.coding.tools.apply_patch.apply_patch import execute as apply_patch
