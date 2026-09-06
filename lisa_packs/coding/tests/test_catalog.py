@@ -1,4 +1,10 @@
-"""Catalog tests for the coding pack."""
+"""Catalog tests for the coding pack.
+
+The pack deliberately exposes a tool-only surface plus Copilot host commands.
+The legacy ``coding`` and ``learn`` modes were removed in cc8ca59
+("feat(personas): export coding tools and delete legacy mode"); these tests read
+the real catalog so they stay honest if the tool inventory changes.
+"""
 
 from __future__ import annotations
 
@@ -12,63 +18,80 @@ from sdk.content import (
 )
 from lisa_packs.coding import get_content_root
 
+# Read-only tools that inspect the source workspace or an owned worktree.
+_READ_TOOLS = {
+    "coding_list_directory",
+    "coding_find_files",
+    "coding_read_file",
+    "coding_search_code",
+    "coding_outline_source",
+    "coding_status",
+    "coding_read_copilot_customizations",
+}
 
-def test_coding_pack_catalog_exposes_read_tools_and_workflow_mode() -> None:
-    """The pack owns a catalog-native coding mode and bounded read tools."""
+# Tools that mutate the worktree / durable artifact or run a check. All are
+# effect ``write`` and keep the user-facing approval gate.
+_LOCAL_WRITE_TOOLS = {
+    "coding_create_worktree",
+    "coding_apply_patch",
+    "coding_run_check",
+    "coding_commit",
+    "coding_cleanup_worktree",
+}
 
+# Publication reaches outside the workspace, so it is ``external_write``.
+_EXTERNAL_WRITE_TOOLS = {"coding_push"}
+
+_ALL_TOOLS = _READ_TOOLS | _LOCAL_WRITE_TOOLS | _EXTERNAL_WRITE_TOOLS
+
+
+def _catalog() -> tuple[dict, dict]:
     root = get_content_root()
-    tool_catalog = json.loads(build_tool_catalog_json(resolve_tool_roots([root])))
-    assert set(tool_catalog) >= {
-        "coding_list_directory",
-        "coding_find_files",
-        "coding_read_file",
-        "coding_search_code",
-        "coding_outline_source",
-    }
-    assert tool_catalog["coding_read_file"]["pack_id"] == "lisa-pack-coding"
-
-    mode_catalog = json.loads(build_mode_catalog_json(resolve_mode_roots([root])))
-    assert mode_catalog["coding"]["tools_authoritative"] is True
-    assert "coding_apply_patch" in mode_catalog["coding"]["allowed_tool_ids"]
-    assert "memory.search" in mode_catalog["coding"]["allowed_tool_ids"]
-    assert "recall_memory" in mode_catalog["coding"]["allowed_operation_ids"]
+    tools = json.loads(build_tool_catalog_json(resolve_tool_roots([root])))
+    modes = json.loads(build_mode_catalog_json(resolve_mode_roots([root])))
+    return tools, modes
 
 
-def test_coding_pack_catalog_exposes_learn_mode() -> None:
-    """The pack owns a read-only, memory-synthesizing learn mode."""
+def test_pack_exposes_tool_only_surface_with_no_modes() -> None:
+    """Post-cc8ca59 the pack owns its bounded tools and declares no modes."""
+    tools, modes = _catalog()
 
-    root = get_content_root()
-    mode_catalog = json.loads(build_mode_catalog_json(resolve_mode_roots([root])))
-    assert "learn" in mode_catalog
-    learn = mode_catalog["learn"]
-    assert learn["mode_kind"] == "chat"
-    assert learn["tools_authoritative"] is True
-    assert "coding_apply_patch" not in learn["allowed_tool_ids"]
-    assert "coding_run_check" not in learn["allowed_tool_ids"]
-    assert "coding_commit" not in learn["allowed_tool_ids"]
-    assert "memory.add" in learn["allowed_tool_ids"]
-    assert "synthesize_and_store_learning" in learn["allowed_operation_ids"]
-    assert "recall_memory" in learn["allowed_operation_ids"]
-    assert "dispute_memory" in learn["allowed_operation_ids"]
+    assert set(tools) == _ALL_TOOLS
+    assert modes == {}
 
 
-def test_learn_mode_recognizes_analyze_as_producer_intent() -> None:
-    """The ``learn`` mode must treat ``analyze`` (and the British
-    ``analyse``) as a ``learning`` intent keyword so the kernel's intent
-    detector flags a producer intent for queries like "analyze the code".
+def test_read_tools_have_read_effect_without_approval_gate() -> None:
+    """Source/worktree inspection never blocks on an approval prompt."""
+    tools, _ = _catalog()
 
-    Regression for the 2026-08-05 incident: "analyze the code, write a
-    doc, and patch the code" detected only ``{write, coding}`` (consumers)
-    because no producer mode declared ``analyze``. The gap had no
-    producer, the fork guard's producer/consumer *mix* check did not fire,
-    and the kernel forced ``fork:markdown,coding`` — both children
-    re-gathered evidence in parallel and never reached their action tools.
-    ``learn`` is the canonical producer for codebase analysis (its
-    description: "Read-only comprehension of the local codebase … for
-    later reuse in design and patch").
-    """
-    root = get_content_root()
-    mode_catalog = json.loads(build_mode_catalog_json(resolve_mode_roots([root])))
-    learn_keywords = mode_catalog["learn"]["routing_intent_keywords"]
-    assert "analyze" in learn_keywords["learning"]
-    assert "analyse" in learn_keywords["learning"]
+    for tool_id in _READ_TOOLS:
+        assert tools[tool_id]["effect"] == "read", tool_id
+        assert tools[tool_id]["approval_required"] is False, tool_id
+
+
+def test_local_write_tools_are_write_effect_and_approval_gated() -> None:
+    """Worktree mutation and check execution keep the approval boundary."""
+    tools, _ = _catalog()
+
+    for tool_id in _LOCAL_WRITE_TOOLS:
+        assert tools[tool_id]["effect"] == "write", tool_id
+        assert tools[tool_id]["approval_required"] is True, tool_id
+
+
+def test_push_is_external_write_and_approval_gated() -> None:
+    """Publication mutates remote state, so it is external_write + gated."""
+    tools, _ = _catalog()
+
+    for tool_id in _EXTERNAL_WRITE_TOOLS:
+        assert tools[tool_id]["effect"] == "external_write", tool_id
+        assert tools[tool_id]["approval_required"] is True, tool_id
+
+
+def test_every_tool_reports_this_pack_id() -> None:
+    """Each tool is attributed to the coding distribution in the catalog."""
+    tools, _ = _catalog()
+
+    assert tools, "expected at least one tool in the catalog"
+    for tool_id, spec in tools.items():
+        assert spec["pack_id"] == "lisa-pack-coding", tool_id
+
