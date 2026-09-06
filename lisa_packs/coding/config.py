@@ -69,15 +69,27 @@ class CodingPackConfig(BaseModel):
         return self
 
     def resolve_workspace_root(self) -> Path:
-        """Resolve the configured root and require it to be a Git worktree."""
+        """Resolve the configured root and require it to be a Git worktree.
 
-        raw = Path(self.workspace_root).expanduser()
-        root = (raw if raw.is_absolute() else Path.cwd() / raw).resolve()
-        if not root.is_dir():
-            raise ValueError(f"workspace_root is not a directory: {root}")
-        if not (root / ".git").exists():
-            raise ValueError(f"workspace_root is not a Git worktree: {root}")
-        return root
+        Delegates expansion/traversal/directory checking to the shared
+        ``sdk.workspace.resolve_workspace_root`` (strict mode); the strictness
+        policy (Git-worktree required) is the single shared rule, not a
+        coding-private one. The config object already holds the validated
+        ``workspace_root`` string, which the SDK resolver reads back via a
+        plain mapping-shaped shim.
+        """
+
+        from sdk.workspace import resolve_workspace_root
+
+        class _Ctx:
+            pack_config = {"workspace_root": self.workspace_root}
+            data_dir = ""
+
+        try:
+            return resolve_workspace_root(_Ctx(), require_git=True)
+        except Exception as exc:
+            # Preserve the module's historical error type for callers.
+            raise ValueError(str(exc)) from exc
 
 
 def get_coding_config(ctx: ToolExecutionContext) -> CodingPackConfig:

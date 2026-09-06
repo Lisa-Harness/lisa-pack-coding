@@ -32,16 +32,31 @@ __all__ = [
 
 
 def _resolve_workspace_root(runtime: HostRuntime) -> Path:
-    """Resolve the workspace root for Copilot customization discovery."""
+    """Resolve the workspace root for Copilot customization discovery.
+
+    Reads the same ``workspace_root`` pack-config channel the tools use, then
+    delegates the path handling to the shared ``sdk.workspace`` resolver so
+    expansion and the directory check match the bwrap/coding contract. Falls
+    back to the process CWD when no workspace is configured.
+    """
+    pack_config: dict = {}
     try:
-        pack_config = runtime.session_plan.manifest.resources.packs.configuration
-        coding_config = pack_config.get("lisa-pack-coding", {})
-        raw = coding_config.get("workspace_root")
-        if raw:
-            return Path(raw).expanduser().resolve()
+        manifest_config = runtime.session_plan.manifest.resources.packs.configuration
+        pack_config = dict(manifest_config.get("lisa-pack-coding", {}) or {})
     except Exception:
+        pack_config = {}
+
+    class _Ctx:
         pass
-    return Path.cwd()
+
+    ctx = _Ctx()
+    ctx.pack_config = pack_config
+    try:
+        from sdk.workspace import resolve_workspace_root
+
+        return resolve_workspace_root(ctx, require_git=False)
+    except Exception:
+        return Path.cwd()
 
 
 def _discover_bundle(runtime: HostRuntime) -> tuple:
