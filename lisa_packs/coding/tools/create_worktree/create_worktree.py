@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from kernel.code_artifacts import CodeChangeArtifact
+from sdk.workproducts import WorkProduct
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.workflow import CodingWorkflowError, run_git
@@ -36,7 +36,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         base = await run_git(source_root, ("rev-parse", "HEAD"), config=config)
         if base.return_code != 0:
             raise CodingWorkflowError(base.stderr.strip() or "Cannot resolve the source HEAD.")
-        artifact = CodeChangeArtifact(
+        artifact = WorkProduct(
             workspace_id=ctx.workspace_id,
             user_id=ctx.user_id,
             user_slug=ctx.user_slug,

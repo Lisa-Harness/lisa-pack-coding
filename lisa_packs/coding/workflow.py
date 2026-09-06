@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from kernel.code_artifacts import CodeChangeArtifact, CodeChangeArtifactStore
+from sdk.workproducts import WorkProduct, WorkProductStore
 from kernel.models import ToolExecutionContext
 from lisa_packs.coding.config import CodingPackConfig
 from lisa_packs.coding.local_files import CodingPathError, resolve_relative_path
@@ -128,7 +128,7 @@ async def run_git(
     )
 
 
-def artifact_owner_matches(artifact: CodeChangeArtifact, ctx: ToolExecutionContext) -> bool:
+def artifact_owner_matches(artifact: WorkProduct, ctx: ToolExecutionContext) -> bool:
     """Return whether an artifact belongs to the current exact host identity."""
 
     return (
@@ -141,7 +141,7 @@ def artifact_owner_matches(artifact: CodeChangeArtifact, ctx: ToolExecutionConte
     )
 
 
-def artifact_worktree(artifact: CodeChangeArtifact, *, config: CodingPackConfig) -> Path:
+def artifact_worktree(artifact: WorkProduct, *, config: CodingPackConfig) -> Path:
     """Return a validated owned worktree that remains outside the source root."""
 
     source_root = config.resolve_workspace_root()
@@ -167,13 +167,13 @@ async def load_owned_artifact(
     artifact_id: str,
     config: CodingPackConfig,
     require_worktree: bool = True,
-) -> CodeChangeArtifact:
+) -> WorkProduct:
     """Load an artifact only when the host and workspace ownership match."""
 
     store = ctx.code_change_artifact_store
     if store is None:
         raise CodingWorkflowError("No code change artifact store is available.")
-    artifact_store = cast(CodeChangeArtifactStore, store)
+    artifact_store = cast(WorkProductStore, store)
     artifact = await artifact_store.get(artifact_id)
     if artifact is None:
         raise CodingWorkflowError(f"Unknown code change artifact '{artifact_id}'.")
@@ -198,7 +198,7 @@ async def readable_root(
     return artifact_worktree(artifact, config=config)
 
 
-def artifact_branch_is_allowed(artifact: CodeChangeArtifact, config: CodingPackConfig) -> bool:
+def artifact_branch_is_allowed(artifact: WorkProduct, config: CodingPackConfig) -> bool:
     """Return whether the artifact branch is owned and outside protection policy."""
 
     return (
@@ -208,7 +208,7 @@ def artifact_branch_is_allowed(artifact: CodeChangeArtifact, config: CodingPackC
     )
 
 
-def artifact_has_current_required_checks(artifact: CodeChangeArtifact) -> bool:
+def artifact_has_current_required_checks(artifact: WorkProduct) -> bool:
     """Require every configured mandatory check to pass at the current revision."""
 
     return all(

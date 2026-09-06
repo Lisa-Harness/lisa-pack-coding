@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from kernel.code_artifacts import CodeCheckRecord, CodeCheckStatus
+from sdk.workproducts import WorkProductCheck, WorkProductCheckStatus
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.workflow import (
@@ -142,10 +142,10 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
                 max_output_bytes=config.max_command_output_bytes,
             )
         elapsed = time.perf_counter() - started
-        status: CodeCheckStatus = (
+        status: WorkProductCheckStatus = (
             "timed_out" if result.timed_out else "passed" if result.return_code == 0 else "failed"
         )
-        record = CodeCheckRecord(
+        record = WorkProductCheck(
             check_id=check.id,
             status=status,
             revision=artifact.revision,
