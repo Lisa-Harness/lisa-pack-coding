@@ -129,16 +129,13 @@ async def run_git(
 
 
 def artifact_owner_matches(artifact: WorkProduct, ctx: ToolExecutionContext) -> bool:
-    """Return whether an artifact belongs to the current exact host identity."""
+    """Return whether an artifact belongs to the current exact host identity.
 
-    return (
-        artifact.workspace_id == ctx.workspace_id
-        and artifact.user_id == ctx.user_id
-        and artifact.user_slug == ctx.user_slug
-        and artifact.surface_type == ctx.surface_type
-        and artifact.surface_id == ctx.surface_id
-        and artifact.session_plan_digest == ctx.session_plan_digest
-    )
+    Delegates to :meth:`WorkProduct.belongs_to`, the canonical ownership rule
+    shared with the publishing pack, so the identity match cannot drift.
+    """
+
+    return artifact.belongs_to(ctx)
 
 
 def artifact_worktree(artifact: WorkProduct, *, config: CodingPackConfig) -> Path:
