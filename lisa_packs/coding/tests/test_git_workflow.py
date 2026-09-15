@@ -1,4 +1,8 @@
-"""Temporary-repository integration tests for the coding worktree workflow."""
+"""Temporary-repository integration tests for the coding worktree workflow.
+
+Uses the framework harness's in-memory ``WorkProductStore`` double so the
+pack tests never import the host layer (packs may import kernel/sdk only).
+"""
 
 from __future__ import annotations
 
@@ -7,8 +11,8 @@ import sys
 from pathlib import Path
 
 import pytest
-from host.code_artifacts import FileCodeChangeArtifactStore
 from kernel.models import ToolExecutionContext
+from packstest.store import MemoryWorkProductStore
 
 from lisa_packs.coding.tools.apply_patch.apply_patch import execute as apply_patch
 from lisa_packs.coding.tools.cleanup_worktree.cleanup_worktree import (
@@ -71,7 +75,7 @@ async def _repository(tmp_path: Path) -> Path:
 
 def _context(
     root: Path,
-    store: FileCodeChangeArtifactStore,
+    store: MemoryWorkProductStore,
     params: dict[str, object],
     *,
     checks: list[dict[str, object]] | None = None,
@@ -108,7 +112,7 @@ async def test_patch_invalidates_checks_and_status_tracks_owned_worktree(tmp_pat
     """A worktree patch receives a new revision and only configured checks can run."""
 
     root = await _repository(tmp_path)
-    store = FileCodeChangeArtifactStore(tmp_path / "artifacts.json")
+    store = MemoryWorkProductStore()
     created = await create_worktree(_context(root, store, {"summary": "change greeting"}))
     assert created.error == ""
     artifact_id = created.output_json["artifact_id"]
@@ -151,7 +155,7 @@ async def test_read_file_uses_owned_worktree_revision_when_artifact_is_supplied(
     """Artifact-scoped reads expose the patched isolated revision, not source HEAD."""
 
     root = await _repository(tmp_path)
-    store = FileCodeChangeArtifactStore(tmp_path / "artifacts.json")
+    store = MemoryWorkProductStore()
     created = await create_worktree(_context(root, store, {"summary": "read patched revision"}))
     artifact_id = created.output_json["artifact_id"]
     patch = """diff --git a/app.txt b/app.txt
@@ -180,7 +184,7 @@ async def test_artifact_scoped_read_tools_use_the_owned_worktree(tmp_path: Path)
     """Discovery, search, and outlines inspect the active isolated revision."""
 
     root = await _repository(tmp_path)
-    store = FileCodeChangeArtifactStore(tmp_path / "artifacts.json")
+    store = MemoryWorkProductStore()
     created = await create_worktree(_context(root, store, {"summary": "inspect worktree"}))
     artifact_id = created.output_json["artifact_id"]
     patch = """diff --git a/feature.py b/feature.py
@@ -222,7 +226,7 @@ async def test_status_exposes_current_diff_and_check_diagnostics(tmp_path: Path)
     """Status returns the evidence needed to diagnose and repair a failed check."""
 
     root = await _repository(tmp_path)
-    store = FileCodeChangeArtifactStore(tmp_path / "artifacts.json")
+    store = MemoryWorkProductStore()
     failing_checks = [
         {
             "id": "failure",
@@ -297,7 +301,7 @@ async def test_patch_rejects_traversal_and_allows_owned_new_file(tmp_path: Path)
     """A patch cannot escape the worktree but may create a contained source file."""
 
     root = await _repository(tmp_path)
-    store = FileCodeChangeArtifactStore(tmp_path / "artifacts.json")
+    store = MemoryWorkProductStore()
     created = await create_worktree(_context(root, store, {"summary": "add source file"}))
     artifact_id = created.output_json["artifact_id"]
     traversal_patch = """diff --git a/../outside.txt b/../outside.txt
@@ -333,7 +337,7 @@ async def test_stale_checks_block_commit_and_dirty_worktree_cleanup(tmp_path: Pa
     """A later patch invalidates checks and prevents both commit and cleanup."""
 
     root = await _repository(tmp_path)
-    store = FileCodeChangeArtifactStore(tmp_path / "artifacts.json")
+    store = MemoryWorkProductStore()
     created = await create_worktree(_context(root, store, {"summary": "two changes"}))
     artifact_id = created.output_json["artifact_id"]
     first_patch = """diff --git a/app.txt b/app.txt

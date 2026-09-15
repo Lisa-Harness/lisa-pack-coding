@@ -22,6 +22,14 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=6.0.0",
     "pytest-mock>=3.14.0",
+    "lisa-packstest",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "live: hits real external signal or provider APIs and prints a tester-visible summary",
+    "integration: multi-module in-process test; may require local services",
+    "eval: deterministic agent regression evals (no model calls, no I/O)",
 ]
 
 [project.entry-points."lisa.extensions.content_roots"]
