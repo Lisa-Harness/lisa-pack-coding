@@ -22,6 +22,25 @@ _TS_DECLARATION = re.compile(
 )
 _TS_ARROW = re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=")
 
+# Go: gofmt keeps every top-level declaration at column 0, so column-anchored
+# regexes are reliable. Methods carry a receiver before the name: func (s *T) M(.
+# Generic type parameters (`[T any]`) sit between the name and the parameter
+# list for both plain funcs and methods.
+_GO_METHOD = re.compile(r"^func\s+\([^)]*\)\s*([A-Za-z_][\w]*)(?:\[[^\]]*\])?\s*\(")
+_GO_FUNC = re.compile(r"^func\s+([A-Za-z_][\w]*)(?:\[[^\]]*\])?\s*\(")
+_GO_TYPE = re.compile(r"^type\s+([A-Za-z_][\w]*)\s+(struct|interface)\b")
+
+# Rust: declarations are keyword-led; identifiers may be pub-scoped, async,
+# unsafe, const, or extern.
+_RS_ITEM = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?"
+    r"(struct|enum|trait|union|impl|mod|type)\s+([A-Za-z_][\w]*)"
+)
+_RS_FN = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?"
+    r"(?:const\s+)?(?:extern\s+\"[^\"]*\"\s+)?fn\s+([A-Za-z_][\w]*)"
+)
+
 
 class Parameters(BaseModel):
     """Structured source outline request."""
@@ -71,6 +90,40 @@ def _ts_outline(source: str) -> list[dict[str, object]]:
     return items
 
 
+def _go_outline(source: str) -> list[dict[str, object]]:
+    """Return a regex-based Go structural outline (funcs, methods, named types)."""
+
+    items: list[dict[str, object]] = []
+    for number, line in enumerate(source.splitlines(), start=1):
+        match = _GO_METHOD.match(line)
+        if match:
+            items.append({"kind": "method", "name": match.group(1), "line": number})
+            continue
+        match = _GO_FUNC.match(line)
+        if match:
+            items.append({"kind": "function", "name": match.group(1), "line": number})
+            continue
+        match = _GO_TYPE.match(line)
+        if match:
+            items.append({"kind": match.group(2), "name": match.group(1), "line": number})
+    return items
+
+
+def _rust_outline(source: str) -> list[dict[str, object]]:
+    """Return a regex-based Rust structural outline (fns and item declarations)."""
+
+    items: list[dict[str, object]] = []
+    for number, line in enumerate(source.splitlines(), start=1):
+        match = _RS_FN.match(line)
+        if match:
+            items.append({"kind": "function", "name": match.group(1), "line": number})
+            continue
+        match = _RS_ITEM.match(line)
+        if match:
+            items.append({"kind": match.group(1), "name": match.group(2), "line": number})
+    return items
+
+
 async def execute(ctx: ToolExecutionContext) -> ToolResult:
     """Extract a bounded structural outline from a local source file."""
 
@@ -90,6 +143,10 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         outline = _python_outline(text)
     elif suffix in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
         outline = _ts_outline(text)
+    elif suffix == ".go":
+        outline = _go_outline(text)
+    elif suffix == ".rs":
+        outline = _rust_outline(text)
     else:
         return ToolResult(tool_id=TOOL_ID, error="Unsupported file type for outline extraction.")
 
