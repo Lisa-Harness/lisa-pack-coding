@@ -14,7 +14,7 @@ name = "lisa-pack-coding"
 version = "0.1.0"
 description = "Provider-neutral local coding workflow tools for Lisa"
 requires-python = ">=3.11"
-dependencies = ["lisa-kernel", "lisa-sdk"]
+dependencies = ["lisa-harness-kernel", "lisa-harness-sdk"]
 
 [project.optional-dependencies]
 dev = [

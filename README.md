@@ -293,7 +293,7 @@ Each tool pairs a Pydantic `Parameters` schema (validated from
 ## Install & test
 
 ```bash
-pip install -e ./coding          # editable; requires lisa-kernel + lisa-sdk, Python ≥ 3.11
+pip install -e ./coding          # editable; requires lisa-harness-kernel + lisa-harness-sdk, Python ≥ 3.11
 ```
 
 ```bash
