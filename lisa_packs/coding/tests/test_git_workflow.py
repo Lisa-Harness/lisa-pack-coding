@@ -7,11 +7,18 @@ pack tests never import the host layer (packs may import kernel/sdk only).
 from __future__ import annotations
 
 import asyncio
+import shutil
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from kernel.models import ToolExecutionContext
+from kernel.capability_binding import ExecutionFloorView
+from kernel.models import ToolExecutionContext, ToolResult
+from packstest.catalog import build_tool_catalog
+from packstest.context import ToolContextFactory
+from packstest.git import git_repo
+from packstest.runner import run_tool
 from packstest.store import MemoryWorkProductStore
 
 from lisa_packs.coding.tools.apply_patch.apply_patch import execute as apply_patch
@@ -80,7 +87,25 @@ def _context(
     *,
     checks: list[dict[str, object]] | None = None,
     required_check_ids: list[str] | None = None,
+    sandbox_result: ToolResult | None = None,
 ) -> ToolExecutionContext:
+    async def dispatch(tool_id: str, parameters: Mapping[str, object]) -> ToolResult:
+        assert tool_id == "bwrap_run"
+        worktree = str(parameters["cwd"])
+        response = sandbox_result or ToolResult(
+            output_text="checked", output_json={"return_code": 0}
+        )
+        return ToolResult(
+            output_text=response.output_text,
+            output_json={
+                **response.output_json,
+                "sandboxed": True,
+                "persistence": "direct-write",
+                "cwd": worktree,
+                "writable_paths": [worktree],
+            },
+        )
+
     return ToolExecutionContext(
         tool_id="test",
         workspace_id="workspace",
@@ -90,6 +115,10 @@ def _context(
         mode_id="coding",
         session_plan_digest="plan",
         parameters=params,
+        execution_floor_for=lambda _tool_id: ExecutionFloorView(
+            execution="sandbox", persistence="direct-write", paths={str(root.parent): "rw"}
+        ),
+        delegated_tool_dispatch=dispatch,
         code_change_artifact_store=store,
         pack_config={
             "workspace_root": str(root),
@@ -233,7 +262,8 @@ async def test_status_exposes_current_diff_and_check_diagnostics(tmp_path: Path)
             "argv": [
                 sys.executable,
                 "-c",
-                "import sys; print('stdout evidence'); print('stderr evidence', file=sys.stderr); sys.exit(1)",
+                "import sys; print('stdout evidence'); "
+                "print('stderr evidence', file=sys.stderr); sys.exit(1)",
             ],
             "timeout_seconds": 30,
         }
@@ -272,6 +302,10 @@ async def test_status_exposes_current_diff_and_check_diagnostics(tmp_path: Path)
             {"artifact_id": artifact_id, "check_id": "failure"},
             checks=failing_checks,
             required_check_ids=[],
+            sandbox_result=ToolResult(
+                output_text="stdout evidence\n",
+                output_json={"return_code": 1, "stderr": "stderr evidence\n"},
+            ),
         )
     )
     assert failed.output_json["status"] == "failed"
@@ -374,3 +408,67 @@ async def test_stale_checks_block_commit_and_dirty_worktree_cleanup(tmp_path: Pa
 
     cleaned = await cleanup_worktree(_context(root, store, {"artifact_id": artifact_id}))
     assert "git worktree remove failed" in cleaned.error
+
+
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_live_bwrap_check_certifies_only_the_owned_worktree(tmp_path: Path) -> None:
+    pack_path = Path(__file__).resolve().parents[3]
+    bwrap_path = pack_path.parent.parent / "lisa-packs" / "bwrap"
+    if not bwrap_path.is_dir() or shutil.which("bwrap") is None:
+        pytest.skip("bwrap checkout or binary unavailable")
+    catalog = build_tool_catalog(pack_path)
+    bwrap_catalog = build_tool_catalog(bwrap_path)
+    repo = await git_repo(tmp_path)
+    factory = ToolContextFactory(
+        root=repo.root,
+        pack_config={
+            "workspace_root": str(repo.root),
+            "checks": [{"id": "smoke", "argv": ["true"], "timeout_seconds": 30}],
+            "required_check_ids": ["smoke"],
+        },
+        data_dir=tmp_path / "data",
+    )
+    factory.execution_floor_for = lambda _tool_id: ExecutionFloorView(
+        execution="sandbox", persistence="direct-write", paths={str(repo.root.parent): "rw"}
+    )
+    bwrap_factory = ToolContextFactory(
+        root=repo.root,
+        pack_config={
+            "workspace_root": str(repo.root),
+            "sandbox": {
+                "floor": {
+                    "execution": "sandbox",
+                    "persistence": "direct-write",
+                    "paths": {str(repo.root.parent): "rw"},
+                }
+            },
+        },
+        identity=factory.identity,
+        data_dir=tmp_path / "data",
+    )
+
+    async def dispatch(tool_id: str, parameters: Mapping[str, object]) -> ToolResult:
+        return (await run_tool(bwrap_catalog, tool_id, bwrap_factory, dict(parameters))).result
+
+    factory.delegated_tool_dispatch = dispatch
+    created = await run_tool(catalog, "coding_create_worktree", factory, {"summary": "live test"})
+    assert created.result.error == ""
+    artifact_id = str(created.result.output_json["artifact_id"])
+    patch = "--- a/app.txt\n+++ b/app.txt\n@@ -1 +1 @@\n-hello\n+hello from lisa\n"
+    patched = await run_tool(
+        catalog, "coding_apply_patch", factory, {"artifact_id": artifact_id, "patch": patch}
+    )
+    assert patched.result.error == ""
+    checked = await run_tool(
+        catalog, "coding_run_check", factory, {"artifact_id": artifact_id, "check_id": "smoke"}
+    )
+    if "bubblewrap sandbox is not available" in checked.result.error:
+        pytest.skip(checked.result.error)
+    assert checked.result.error == "", checked.result.error
+    assert checked.result.output_json["status"] == "passed"
+    committed = await run_tool(
+        catalog, "coding_commit", factory, {"artifact_id": artifact_id, "message": "live check"}
+    )
+    assert committed.result.error == "", committed.result.error
+    assert (repo.root / "app.txt").read_text(encoding="utf-8") == "hello\n"

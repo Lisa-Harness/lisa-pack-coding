@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pathlib import Path
 
 from kernel.models import ToolExecutionContext, ToolResult
-from lisa_packs.coding.config import get_coding_config
+from lisa_packs.coding.config import CodingPackConfig, get_coding_config
 from lisa_packs.coding.workflow import (
     CodingWorkflowError,
     artifact_branch_is_allowed,
     artifact_has_current_required_checks,
     artifact_worktree,
+    candidate_tree_sha,
     changed_paths,
     load_owned_artifact,
     run_git,
 )
+from pydantic import BaseModel, Field
 
 TOOL_ID = "coding_commit"
 
@@ -24,6 +26,14 @@ class Parameters(BaseModel):
 
     artifact_id: str = Field(min_length=1, max_length=100)
     message: str = Field(min_length=1, max_length=240)
+
+
+async def _verify_committed_tree(
+    worktree: Path, *, config: CodingPackConfig, candidate_tree: str
+) -> None:
+    tree = await run_git(worktree, ("rev-parse", "HEAD^{tree}"), config=config)
+    if tree.return_code != 0 or tree.stdout.strip() != candidate_tree:
+        raise CodingWorkflowError("Committed tree differs from the checked candidate tree.")
 
 
 async def execute(ctx: ToolExecutionContext) -> ToolResult:
@@ -41,11 +51,12 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         )
         if not artifact_branch_is_allowed(artifact, config):
             raise CodingWorkflowError("Artifact branch is not an owned unprotected feature branch.")
-        if not artifact_has_current_required_checks(artifact):
-            raise CodingWorkflowError(
-                "Every required check must pass at the current artifact revision."
-            )
         worktree = artifact_worktree(artifact, config=config)
+        candidate_tree = await candidate_tree_sha(worktree, config=config)
+        if not artifact_has_current_required_checks(artifact, candidate_tree=candidate_tree):
+            raise CodingWorkflowError(
+                "Every required check must pass at the current artifact revision and checked tree."
+            )
         current_branch = await run_git(worktree, ("branch", "--show-current"), config=config)
         if current_branch.return_code != 0 or current_branch.stdout.strip() != artifact.branch:
             raise CodingWorkflowError("Owned worktree is not on the recorded feature branch.")
@@ -61,6 +72,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         head = await run_git(worktree, ("rev-parse", "HEAD"), config=config)
         if head.return_code != 0:
             raise CodingWorkflowError(head.stderr.strip() or "Cannot resolve committed HEAD.")
+        await _verify_committed_tree(worktree, config=config, candidate_tree=candidate_tree)
         artifact.commit_sha = head.stdout.strip()
         artifact.head_sha = artifact.commit_sha
         artifact.status = "committed"

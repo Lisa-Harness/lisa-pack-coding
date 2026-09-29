@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
-
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.workflow import (
@@ -11,9 +9,11 @@ from lisa_packs.coding.workflow import (
     artifact_branch_is_allowed,
     artifact_has_current_required_checks,
     artifact_worktree,
+    candidate_tree_sha,
     load_owned_artifact,
     run_git,
 )
+from pydantic import BaseModel, Field
 
 TOOL_ID = "coding_push"
 
@@ -39,11 +39,13 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             raise CodingWorkflowError("Artifact has no committed revision to push.")
         if not artifact_branch_is_allowed(artifact, config):
             raise CodingWorkflowError("Artifact branch is not an owned unprotected feature branch.")
-        if not artifact_has_current_required_checks(artifact):
-            raise CodingWorkflowError(
-                "Every required check must pass at the current artifact revision."
-            )
         worktree = artifact_worktree(artifact, config=config)
+        if not artifact_has_current_required_checks(
+            artifact, candidate_tree=await candidate_tree_sha(worktree, config=config)
+        ):
+            raise CodingWorkflowError(
+                "Every required check must pass at the current artifact revision and checked tree."
+            )
         current_head = await run_git(worktree, ("rev-parse", "HEAD"), config=config)
         if current_head.return_code != 0 or current_head.stdout.strip() != artifact.commit_sha:
             raise CodingWorkflowError("Owned worktree HEAD no longer matches the recorded commit.")

@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+import os
+import tempfile
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from sdk.workproducts import WorkProduct, WorkProductStore
 from kernel.models import ToolExecutionContext
+from sdk.workproducts import WorkProduct, WorkProductStore
+
 from lisa_packs.coding.config import CodingPackConfig
 from lisa_packs.coding.local_files import CodingPathError, resolve_relative_path
 
@@ -20,6 +23,7 @@ __all__ = [
     "artifact_has_current_required_checks",
     "artifact_owner_matches",
     "artifact_worktree",
+    "candidate_tree_sha",
     "changed_paths",
     "load_owned_artifact",
     "patch_paths",
@@ -71,6 +75,7 @@ async def run_process(
     timeout_seconds: int,
     max_output_bytes: int,
     stdin_text: str | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> ProcessResult:
     """Execute an explicit argument vector without a shell or unbounded output."""
 
@@ -82,6 +87,7 @@ async def run_process(
         stdin=asyncio.subprocess.PIPE if stdin_text is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
     assert process.stdout is not None
     assert process.stderr is not None
@@ -116,6 +122,7 @@ async def run_git(
     *,
     config: CodingPackConfig,
     stdin_text: str | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> ProcessResult:
     """Run Git with a fixed executable and bounded output."""
 
@@ -125,7 +132,21 @@ async def run_git(
         timeout_seconds=config.git_timeout_seconds,
         max_output_bytes=config.max_command_output_bytes,
         stdin_text=stdin_text,
+        env=env,
     )
+
+
+async def candidate_tree_sha(worktree: Path, *, config: CodingPackConfig) -> str:
+    """Hash tracked and untracked commit candidates without changing the live index."""
+    with tempfile.TemporaryDirectory(prefix="lisa-candidate-index-") as temp_dir:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(temp_dir) / "index")}
+        for args in (("read-tree", "HEAD"), ("add", "-A", "--", "."), ("write-tree",)):
+            result = await run_git(worktree, args, config=config, env=env)
+            if result.return_code != 0:
+                raise CodingWorkflowError(
+                    result.stderr.strip() or "Cannot hash candidate Git tree."
+                )
+        return result.stdout.strip()
 
 
 def artifact_owner_matches(artifact: WorkProduct, ctx: ToolExecutionContext) -> bool:
@@ -205,13 +226,16 @@ def artifact_branch_is_allowed(artifact: WorkProduct, config: CodingPackConfig) 
     )
 
 
-def artifact_has_current_required_checks(artifact: WorkProduct) -> bool:
+def artifact_has_current_required_checks(
+    artifact: WorkProduct, *, candidate_tree: str
+) -> bool:
     """Require every configured mandatory check to pass at the current revision."""
 
     return all(
         (record := artifact.checks.get(check_id)) is not None
         and record.status == "passed"
         and record.revision == artifact.revision
+        and record.checked_tree_sha == candidate_tree
         for check_id in artifact.required_check_ids
     )
 

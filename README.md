@@ -8,9 +8,9 @@ check it, commit it — under a policy the user sets and the host enforces.
 > Sandboxing (bubblewrap containment) comes from the sibling pack
 > [`lisa-pack-bwrap`](../bwrap/README.md); an interactive shell and approvals
 > come from [`lisa-pack-bash`](../bash/README.md). This pack composes through
-> them but does not require them. Publication (push → pull request) is handed
-> to [`lisa-pack-github`](../github/README.md) — by design, this pack stops at
-> "push the checked branch."
+> them; configured checks require an authorized bwrap execution floor.
+> Publication (push and pull request) is opt-in and handled through this pack
+> and [`lisa-pack-github`](../github/README.md), respectively.
 
 **Review** here means auditing the security and ownership rules below against
 [workflow.py](lisa_packs/coding/workflow.py) and the tool bodies. **Modify**
@@ -32,10 +32,10 @@ owned worktree, never the source checkout.
 
 | Tool | Effect | Approval | Role |
 | --- | --- | --- | --- |
-| `coding_create_worktree` | write | ✓ | Mint an artifact + `git worktree add` an isolated branch `<prefix><artifact_id>` at the source `HEAD`. Worktree lives at `<source>/.lisa-worktrees/<id>` — **outside** the source tree, enforced. |
+| `coding_create_worktree` | write | ✓ | Mint a task-bound artifact + `git worktree add` an isolated branch `<prefix><artifact_id>` at the source `HEAD`. Worktree lives at `<source-parent>/.lisa-worktrees/<id>` — **outside** the source tree, enforced. |
 | `coding_apply_patch` | write | ✓ | Prevalidate (`git apply --check`) and apply a bounded unified diff. Bumps `revision`, records `changed_paths`, **clears `checks`** (stale results are invalidated). |
-| `coding_run_check` | write | ✓ | Run one named, session-configured check argv in the worktree. Result recorded at the **current revision** with `passed`/`failed`/`timed_out`. |
-| `coding_commit` | write | ✓ | Stage changed paths and commit — **only** when every required check passed at the current revision and the branch is owned + unprotected. No newline in the message. |
+| `coding_run_check` | write | ✓ | Run one named check through the bwrap owner's direct-write sandbox floor. Result records the current revision and candidate-tree hash; no host fallback. |
+| `coding_commit` | write | ✓ | Stage commit candidates and commit only after required checks passed for this revision and tree, on the owned unprotected branch. No newline in the message. |
 | `coding_push` | external_write | ✓ | Push the checked feature branch upstream (`push_remote`). **No force option exists.** |
 | `coding_cleanup_worktree` | write | ✓ | Remove a **clean** owned worktree (`git worktree remove`, no force). |
 | `coding_status` | read | — | Report git status/diff + check state for an artifact without mutating it. |
@@ -81,11 +81,14 @@ create_worktree ─▶ apply_patch ─▶ run_check ─▶ commit ─▶ push �
 
 Every artifact is a **`WorkProduct`** (`sdk.workproducts`) carrying a six-field
 host identity — `workspace_id`, `user_id`, `user_slug`, `surface_type`,
-`surface_id`, `session_plan_digest`. Load-time ownership is checked via the
-shared canonical rule [`artifact.belongs_to(ctx)`](
-lisa_packs/coding/workflow.py) (`artifact_owner_matches`), so an artifact from
+`surface_id`, `session_plan_digest`, plus the creation `task_id`. Load-time
+ownership is checked via the shared canonical rule
+[`artifact.belongs_to(ctx)`](lisa_packs/coding/workflow.py)
+(`artifact_owner_matches`), so an artifact from
 another user/workspace/session simply **won't load** — this is the seam that
 lets the github pack reuse the exact same match without drift.
+The host also checks the task ID, actual Git commit and changed paths, required
+check-tree hashes, and a clean worktree before the executor can finish.
 
 The gating rules, each backed by a guard in
 [workflow.py](lisa_packs/coding/workflow.py):
@@ -96,10 +99,10 @@ The gating rules, each backed by a guard in
 - **Owned, unprotected branch** — `artifact_branch_is_allowed()` requires the
   branch to start with `branch_prefix` (default `lisa/`) and not be in
   `protected_branches` (default `main`, `master`).
-- **Checks green at this revision** — `artifact_has_current_required_checks()`
-  requires each `required_check_ids` entry to be `passed` **and** stamped at
-  the artifact's current `revision`. Because `apply_patch` clears `checks`, a
-  commit always reflects the *latest* code, not a stale pass.
+- **Checks green on this tree** — `artifact_has_current_required_checks()`
+  requires every required check to be `passed` at the current revision and
+  candidate Git tree. Patching clears old checks; changing tracked or
+  untracked candidates after a check invalidates it before commit.
 - **Patch paths are validated** — `patch_paths()` walks every `---`/`+++`
   header of the diff through the same traversal/symlink/exclusion validator
   (`resolve_relative_path`) the read tools use; a patch naming a forbidden
@@ -117,17 +120,13 @@ drains stdout/stderr through `_drain_limited` (retains at most
 the pack's `git_timeout_seconds`. All git work happens in the **owned
 worktree**, never the source checkout.
 
-### `run_check` composes through bwrap when present
+### `run_check` requires bwrap
 
-The riskiest exec — an arbitrary configured check argv — is contained when the
-bwrap pack is registered. [run_check.py](
-lisa_packs/coding/tools/run_check/run_check.py) `_sandbox_registered()` probes
-the tool registry for `bwrap_run`; if present it builds a child
-`ToolExecutionContext` and runs the check through `bwrap_run` (read-only
-filesystem, the worktree bound writable and set as `cwd`). On any degradation —
-pack absent, binary missing, namespaced run failed — it **falls back to host
-exec** and stamps the result `sandboxed: false`. Containment is best-effort
-and *loud*, never silent.
+The check argv runs through the bwrap owner's delegated `bwrap_run` binding.
+[run_check.py](lisa_packs/coding/tools/run_check/run_check.py) requires a floor
+with `execution: sandbox`, `persistence: direct-write`, and an explicit `rw`
+grant covering the owned worktree. Missing authorization, a degraded sandbox,
+or a changed candidate tree fails the check without running it on the host.
 
 ## Configuration
 
@@ -200,6 +199,7 @@ resources:
   packs:
     include:
       - lisa-pack-coding
+      - lisa-pack-bwrap
     required:
       - lisa-pack-coding
     configuration:
@@ -222,6 +222,14 @@ resources:
         max_patch_bytes: 200000
         max_command_output_bytes: 100000
         git_timeout_seconds: 60
+      lisa-pack-bwrap:
+        sandbox:
+          floor:
+            execution: sandbox
+            persistence: direct-write
+            network: deny
+            paths:
+              /home/you/Code/.lisa-worktrees: rw
 routing:
   # Optional: route natural-language shell intent elsewhere; this pack is
   # tool-only and has no start_mode.
@@ -229,8 +237,8 @@ routing:
 ```
 
 With this plan, a change is gated: `coding_apply_patch` bumps the revision and
-clears check results; both `unit` and `type` must re-pass at that revision or
-`coding_commit` returns an error. Use absolute interpreter paths in `argv`
+clears check results; both `unit` and `type` must re-pass on the candidate tree
+or `coding_commit` returns an error. Use absolute interpreter paths in `argv`
 (the bounded executor does no shell PATH lookups).
 
 ## Language support
@@ -334,10 +342,9 @@ per pack.
   Git-level) are separate. An overlay layer **cannot** become a `WorkProduct`;
   a patch verified under tmpfs scratch must be re-applied via
   `coding_apply_patch`. There's no bridge type in the kernel artifact — yet.
-- **Checks are contained only when bwrap is installed.** Without it they run on
-  the host (stamped `sandboxed: false`). If your threat model requires
-  containment, require the bwrap pack rather than trusting every workspace to
-  have it.
+- **Checks fail closed without authorized containment.** Missing bwrap,
+  insufficient worktree `rw` grants, or degraded sandbox evidence rejects the
+  check; no unchecked host execution is substituted.
 - **The model can't self-approve.** Approval lives in the host engine keyed off
   a containment fact the *pack reports* but the *host owns*; this pack never
   decides its own gate.

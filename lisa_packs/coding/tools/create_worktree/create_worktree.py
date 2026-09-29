@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
-
-from sdk.workproducts import WorkProduct
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.workflow import CodingWorkflowError, run_git
+from pydantic import BaseModel, Field
+from sdk.workproducts import WorkProduct
 
 TOOL_ID = "coding_create_worktree"
 
@@ -37,6 +36,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         if base.return_code != 0:
             raise CodingWorkflowError(base.stderr.strip() or "Cannot resolve the source HEAD.")
         artifact = WorkProduct(
+            task_id=ctx.task_id,
             workspace_id=ctx.workspace_id,
             user_id=ctx.user_id,
             user_slug=ctx.user_slug,
