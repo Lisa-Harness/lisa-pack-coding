@@ -4,8 +4,3 @@ description: "Search the source workspace or an owned artifact worktree through 
 exportable: true
 effect: read
 max_calls_per_turn: 40
-# One-line abbreviation returned when the model re-runs the same query
-# within a single turn. Reuses the tool's own output_text ("Found N
-# matches.") so the count is preserved without duplicating the match
-# list in the message history.
-abbreviation_template: "{output_text} (already searched this turn; see prior result)"

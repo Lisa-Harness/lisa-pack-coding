@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from kernel.models import ToolExecutionContext
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-__all__ = ["CodingCheck", "CodingPackConfig", "get_coding_config"]
+__all__ = [
+    "CodingCheck",
+    "CodingPackConfig",
+    "CodingPreparationRecipe",
+    "get_coding_config",
+]
 
 
 class CodingCheck(BaseModel):
@@ -18,6 +24,18 @@ class CodingCheck(BaseModel):
     id: str = Field(min_length=1, max_length=80)
     argv: tuple[str, ...] = Field(min_length=1)
     timeout_seconds: int = Field(default=300, ge=1, le=1800)
+
+
+class CodingPreparationRecipe(BaseModel):
+    """One finite, session-authorized workspace preparation recipe."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(min_length=1, max_length=80)
+    manager: Literal["uv"] = "uv"
+    project_modules: tuple[str, ...] = Field(min_length=1, max_length=20)
+    baseline_check_ids: tuple[str, ...] = ()
+    timeout_seconds: int = Field(default=600, ge=1, le=1800)
 
 
 class CodingPackConfig(BaseModel):
@@ -41,6 +59,7 @@ class CodingPackConfig(BaseModel):
     )
     checks: tuple[CodingCheck, ...] = ()
     required_check_ids: tuple[str, ...] = ()
+    preparation_recipes: tuple[CodingPreparationRecipe, ...] = ()
     branch_prefix: str = Field(default="lisa/", min_length=1, max_length=80)
     protected_branches: tuple[str, ...] = ("main", "master")
     max_directory_entries: int = Field(default=200, ge=1, le=1000)
@@ -64,9 +83,40 @@ class CodingPackConfig(BaseModel):
             raise ValueError(
                 "required_check_ids reference unknown checks: " + ", ".join(unknown_required)
             )
+        recipe_ids = [recipe.id for recipe in self.preparation_recipes]
+        if len(recipe_ids) != len(set(recipe_ids)):
+            raise ValueError("preparation_recipes must use unique IDs")
+        for recipe in self.preparation_recipes:
+            unknown_baseline = sorted(set(recipe.baseline_check_ids) - set(check_ids))
+            if unknown_baseline:
+                raise ValueError(
+                    f"recipe '{recipe.id}' references unknown baseline checks: "
+                    + ", ".join(unknown_baseline)
+                )
+        if self.preparation_recipes:
+            checks_without_owned_python = [
+                check.id for check in self.checks if "{workspace_python}" not in check.argv
+            ]
+            if checks_without_owned_python:
+                raise ValueError(
+                    "checks must include {workspace_python} when preparation_recipes are configured: "
+                    + ", ".join(checks_without_owned_python)
+                )
         if any(branch in self.protected_branches for branch in ("", self.branch_prefix)):
             raise ValueError("branch_prefix must not be an empty or protected branch")
         return self
+
+    def preparation_recipe(self, recipe_id: str | None) -> CodingPreparationRecipe:
+        """Return an explicitly or uniquely selected finite preparation recipe."""
+
+        if recipe_id is not None:
+            recipe = next((item for item in self.preparation_recipes if item.id == recipe_id), None)
+            if recipe is None:
+                raise ValueError(f"Unknown configured preparation recipe '{recipe_id}'.")
+            return recipe
+        if len(self.preparation_recipes) != 1:
+            raise ValueError("recipe_id is required when preparation is not uniquely configured.")
+        return self.preparation_recipes[0]
 
     def resolve_workspace_root(self) -> Path:
         """Resolve the configured root and require it to be a Git worktree.

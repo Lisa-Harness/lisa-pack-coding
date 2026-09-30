@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import Literal
 
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import get_coding_config
@@ -22,6 +23,7 @@ class Parameters(BaseModel):
     """Structured code search request."""
 
     artifact_id: str | None = Field(default=None, min_length=1, max_length=100)
+    scope: Literal["auto", "source", "worktree"] = "auto"
     query: str = Field(min_length=1, max_length=500)
     path: str = Field(default="", description="Optional relative file or directory scope.")
     max_results: int = Field(default=25, ge=1, le=200)
@@ -119,11 +121,14 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     params = Parameters.model_validate(ctx.parameters)
     try:
         config = get_coding_config(ctx)
-        root = await readable_root(ctx, artifact_id=params.artifact_id, config=config)
-        scope = resolve_relative_path_at_root(root, params.path, allow_root=True)
-        if not scope.exists():
+        read_root = await readable_root(
+            ctx, artifact_id=params.artifact_id, scope=params.scope, config=config
+        )
+        root = read_root.path
+        search_scope = resolve_relative_path_at_root(root, params.path, allow_root=True)
+        if not search_scope.exists():
             return ToolResult(tool_id=TOOL_ID, error="Requested path does not exist.")
-        search_path = scope.relative_to(root).as_posix() or "."
+        search_path = search_scope.relative_to(root).as_posix() or "."
         results, timed_out, overflowed = await _run_ripgrep(
             root=root,
             path=search_path,
@@ -142,5 +147,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             "matches": results,
             "timed_out": timed_out,
             "output_truncated": overflowed,
+            "scope": read_root.scope,
+            "artifact_id": read_root.artifact_id,
         },
     )

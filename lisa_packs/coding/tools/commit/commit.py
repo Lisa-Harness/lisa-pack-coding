@@ -14,6 +14,7 @@ from lisa_packs.coding.workflow import (
     candidate_tree_sha,
     changed_paths,
     load_owned_artifact,
+    preparation_is_current,
     run_git,
 )
 from pydantic import BaseModel, Field
@@ -52,6 +53,10 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         if not artifact_branch_is_allowed(artifact, config):
             raise CodingWorkflowError("Artifact branch is not an owned unprotected feature branch.")
         worktree = artifact_worktree(artifact, config=config)
+        if not preparation_is_current(artifact, worktree=worktree, config=config):
+            raise CodingWorkflowError(
+                "Workspace preparation is missing or stale; run coding_prepare_workspace first."
+            )
         candidate_tree = await candidate_tree_sha(worktree, config=config)
         if not artifact_has_current_required_checks(artifact, candidate_tree=candidate_tree):
             raise CodingWorkflowError(

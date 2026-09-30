@@ -4,9 +4,3 @@ description: "Read a byte- and line-bounded text excerpt from the source workspa
 exportable: true
 effect: read
 max_calls_per_turn: 50
-# One-line abbreviation returned when the model re-requests the same path
-# and line range within a single turn. The turn runner caches the
-# signature (tool + path + start_line + end_line) and returns this
-# formatted string instead of re-reading the file, so a re-read costs
-# ~200 tokens instead of ~4,000.
-abbreviation_template: "read {path}:{start_line}-{end_line} -> {total_lines_observed} lines (already read this turn; see prior result)"

@@ -7,6 +7,7 @@ pack tests never import the host layer (packs may import kernel/sdk only).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import shutil
 import sys
 from collections.abc import Mapping
@@ -29,6 +30,7 @@ from lisa_packs.coding.tools.commit.commit import execute as commit
 from lisa_packs.coding.tools.create_worktree.create_worktree import (
     execute as create_worktree,
 )
+from lisa_packs.coding.tools.edit_files.edit_files import execute as edit_files
 from lisa_packs.coding.tools.find_files.find_files import execute as find_files
 from lisa_packs.coding.tools.list_directory.list_directory import (
     execute as list_directory,
@@ -87,7 +89,9 @@ def _context(
     *,
     checks: list[dict[str, object]] | None = None,
     required_check_ids: list[str] | None = None,
+    preparation_recipes: list[dict[str, object]] | None = None,
     sandbox_result: ToolResult | None = None,
+    task_id: str = "",
 ) -> ToolExecutionContext:
     async def dispatch(tool_id: str, parameters: Mapping[str, object]) -> ToolResult:
         assert tool_id == "bwrap_run"
@@ -114,6 +118,7 @@ def _context(
         surface_id="surface",
         mode_id="coding",
         session_plan_digest="plan",
+        task_id=task_id,
         parameters=params,
         execution_floor_for=lambda _tool_id: ExecutionFloorView(
             execution="sandbox", persistence="direct-write", paths={str(root.parent): "rw"}
@@ -132,6 +137,9 @@ def _context(
             "required_check_ids": required_check_ids
             if required_check_ids is not None
             else ["unit"],
+            "preparation_recipes": preparation_recipes
+            if preparation_recipes is not None
+            else [],
         },
     )
 
@@ -178,6 +186,116 @@ async def test_patch_invalidates_checks_and_status_tracks_owned_worktree(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_configured_preparation_blocks_checks_until_current(tmp_path: Path) -> None:
+    """Preparation is enforced only when the session config opts into recipes."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    checks = [
+        {
+            "id": "unit",
+            "argv": ["{workspace_python}", "-c", "print('checked')"],
+            "timeout_seconds": 30,
+        }
+    ]
+    recipes = [{"id": "python-uv", "project_modules": ["app"]}]
+    created = await create_worktree(
+        _context(root, store, {"summary": "prepared check"}, checks=checks, preparation_recipes=recipes)
+    )
+    artifact_id = created.output_json["artifact_id"]
+
+    blocked = await run_check(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "check_id": "unit"},
+            checks=checks,
+            preparation_recipes=recipes,
+        )
+    )
+
+    assert "Workspace preparation is missing or stale" in blocked.error
+
+
+@pytest.mark.asyncio
+async def test_structured_edits_require_fresh_hashes_and_validate_as_a_batch(
+    tmp_path: Path,
+) -> None:
+    """Exact snapshot guards reject stale input without partially applying a batch."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "structured edit"}))
+    artifact_id = created.output_json["artifact_id"]
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    original = "hello\n"
+    digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
+
+    rejected = await edit_files(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "edits": [
+                    {
+                        "kind": "update",
+                        "path": "app.txt",
+                        "expected_sha256": digest,
+                        "replacements": [{"old_text": "hello", "new_text": "hello edited"}],
+                    },
+                    {"kind": "create", "path": "app.txt", "content": "duplicate"},
+                ],
+            },
+        )
+    )
+    assert "Each structured edit path must be unique" in rejected.error
+    assert Path(artifact.worktree_path, "app.txt").read_text(encoding="utf-8") == original
+
+    edited = await edit_files(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "edits": [
+                    {
+                        "kind": "update",
+                        "path": "app.txt",
+                        "expected_sha256": digest,
+                        "replacements": [{"old_text": "hello", "new_text": "hello edited"}],
+                    },
+                    {"kind": "create", "path": "new.txt", "content": "new file\n"},
+                ],
+            },
+        )
+    )
+    assert edited.error == ""
+    assert edited.output_json["revision"] == 1
+    assert Path(artifact.worktree_path, "app.txt").read_text(encoding="utf-8") == "hello edited\n"
+    assert Path(artifact.worktree_path, "new.txt").read_text(encoding="utf-8") == "new file\n"
+
+    stale = await edit_files(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "edits": [
+                    {
+                        "kind": "delete",
+                        "path": "app.txt",
+                        "expected_sha256": digest,
+                    }
+                ],
+            },
+        )
+    )
+    assert "File changed since it was read" in stale.error
+
+
+@pytest.mark.asyncio
 async def test_read_file_uses_owned_worktree_revision_when_artifact_is_supplied(
     tmp_path: Path,
 ) -> None:
@@ -206,6 +324,44 @@ async def test_read_file_uses_owned_worktree_revision_when_artifact_is_supplied(
     assert read.error == ""
     assert read.output_json["excerpt"] == [{"line": 1, "text": "hello from the worktree"}]
     assert (root / "app.txt").read_text(encoding="utf-8") == "hello\n"
+
+
+@pytest.mark.asyncio
+async def test_read_file_defaults_to_the_unambiguous_task_worktree(tmp_path: Path) -> None:
+    """Automatic reads follow the current task's worktree, not the source checkout."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    task_id = "task-123"
+    created = await create_worktree(
+        _context(root, store, {"summary": "default scoped read"}, task_id=task_id)
+    )
+    artifact_id = created.output_json["artifact_id"]
+    patch = """diff --git a/app.txt b/app.txt
+--- a/app.txt
++++ b/app.txt
+@@ -1 +1 @@
+-hello
++hello from the task worktree
+"""
+    patched = await apply_patch(
+        _context(root, store, {"artifact_id": artifact_id, "patch": patch}, task_id=task_id)
+    )
+    assert patched.error == ""
+
+    automatic = await read_file(_context(root, store, {"path": "app.txt"}, task_id=task_id))
+    source = await read_file(
+        _context(root, store, {"path": "app.txt", "scope": "source"}, task_id=task_id)
+    )
+
+    assert automatic.output_json["scope"] == "worktree"
+    assert automatic.output_json["artifact_id"] == artifact_id
+    assert automatic.output_json["excerpt"] == [
+        {"line": 1, "text": "hello from the task worktree"}
+    ]
+    assert source.output_json["scope"] == "source"
+    assert source.output_json["artifact_id"] is None
+    assert source.output_json["excerpt"] == [{"line": 1, "text": "hello"}]
 
 
 @pytest.mark.asyncio

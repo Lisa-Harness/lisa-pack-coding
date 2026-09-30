@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.local_files import (
@@ -19,6 +21,7 @@ class Parameters(BaseModel):
     """Structured bounded line-range request."""
 
     artifact_id: str | None = Field(default=None, min_length=1, max_length=100)
+    scope: Literal["auto", "source", "worktree"] = "auto"
     path: str = Field(min_length=1)
     start_line: int = Field(default=1, ge=1)
     end_line: int = Field(default=200, ge=1)
@@ -30,8 +33,10 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     params = Parameters.model_validate(ctx.parameters)
     try:
         config = get_coding_config(ctx)
-        root = await readable_root(ctx, artifact_id=params.artifact_id, config=config)
-        path = resolve_relative_path_at_root(root, params.path)
+        read_root = await readable_root(
+            ctx, artifact_id=params.artifact_id, scope=params.scope, config=config
+        )
+        path = resolve_relative_path_at_root(read_root.path, params.path)
         if not path.is_file():
             return ToolResult(tool_id=TOOL_ID, error="Requested path is not a file.")
         text, byte_truncated = read_text_file(path, max_bytes=config.max_file_bytes)
@@ -50,6 +55,8 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         output_text=f"Read {len(excerpt)} lines from {params.path}.",
         output_json={
             "path": params.path,
+            "scope": read_root.scope,
+            "artifact_id": read_root.artifact_id,
             "start_line": start_line,
             "end_line": excerpt[-1]["line"] if excerpt else start_line,
             "total_lines_observed": len(all_lines),

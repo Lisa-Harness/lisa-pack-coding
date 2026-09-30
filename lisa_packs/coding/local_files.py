@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections.abc import Iterable
 from pathlib import Path
@@ -13,6 +14,7 @@ __all__ = [
     "excluded_relative_path",
     "iter_source_files",
     "read_text_file",
+    "read_utf8_file_snapshot",
     "relative_path",
     "resolve_relative_path",
     "resolve_relative_path_at_root",
@@ -124,4 +126,20 @@ def read_text_file(path: Path, *, max_bytes: int) -> tuple[str, bool]:
     was_truncated = len(payload) > max_bytes
     text = payload[:max_bytes].decode("utf-8", errors="replace")
     return text, was_truncated
+
+
+def read_utf8_file_snapshot(path: Path, *, max_bytes: int) -> tuple[str, str]:
+    """Return complete UTF-8 text and its exact-byte SHA-256 digest."""
+
+    with path.open("rb") as handle:
+        payload = handle.read(max_bytes + 1)
+    if len(payload) > max_bytes:
+        raise CodingPathError("File exceeds the configured byte limit for editing.")
+    if b"\x00" in payload:
+        raise CodingPathError("Binary files cannot be edited as source text.")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CodingPathError("Files must be valid UTF-8 for structured editing.") from exc
+    return text, hashlib.sha256(payload).hexdigest()
 

@@ -3,22 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from kernel.models import ToolExecutionContext
 from sdk.workproducts import WorkProduct, WorkProductStore
 
-from lisa_packs.coding.config import CodingPackConfig
+from lisa_packs.coding.config import CodingCheck, CodingPackConfig, CodingPreparationRecipe
 from lisa_packs.coding.local_files import CodingPathError, resolve_relative_path
 
 __all__ = [
     "CodingWorkflowError",
     "ProcessResult",
+    "ReadableRoot",
     "artifact_branch_is_allowed",
     "artifact_has_current_required_checks",
     "artifact_owner_matches",
@@ -27,9 +30,15 @@ __all__ = [
     "changed_paths",
     "load_owned_artifact",
     "patch_paths",
+    "preparation_is_current",
+    "preparation_recipe_digest",
     "readable_root",
+    "run_contained",
     "run_git",
     "run_process",
+    "dependency_manifest_digest",
+    "expand_check_argv",
+    "workspace_python",
 ]
 
 _GIT_STATUS_PATH_OFFSET = 3
@@ -48,6 +57,15 @@ class ProcessResult:
     stderr: str
     timed_out: bool = False
     output_truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ReadableRoot:
+    """The resolved workspace root and the scope that selected it."""
+
+    path: Path
+    scope: Literal["source", "worktree"]
+    artifact_id: str | None = None
 
 
 async def _drain_limited(
@@ -114,6 +132,135 @@ async def run_process(
         timed_out=timed_out,
         output_truncated=stdout_overflowed or stderr_overflowed,
     )
+
+
+async def run_contained(
+    ctx: ToolExecutionContext,
+    argv: Sequence[str],
+    *,
+    worktree: Path,
+    timeout_seconds: int,
+) -> ProcessResult:
+    """Run under the bwrap owner's verified direct-write worktree floor."""
+
+    dispatch = ctx.delegated_tool_dispatch
+    floor_for = ctx.execution_floor_for
+    floor = floor_for("bwrap_run") if floor_for is not None else None
+    if (
+        dispatch is None
+        or floor is None
+        or floor.execution != "sandbox"
+        or floor.persistence != "direct-write"
+    ):
+        raise CodingWorkflowError("bwrap sandbox has no direct-write execution floor.")
+    matching_paths = (
+        (root, access)
+        for path, access in floor.paths.items()
+        if (root := Path(path).expanduser().resolve()) == worktree
+        or worktree.is_relative_to(root)
+    )
+    nearest = max(matching_paths, key=lambda entry: len(entry[0].parts), default=None)
+    if nearest is None or nearest[1] != "rw":
+        raise CodingWorkflowError("bwrap sandbox floor does not permit worktree writes.")
+    tool_result = await dispatch(
+        "bwrap_run",
+        {
+            "argv": list(argv),
+            "cwd": str(worktree),
+            "overrides": {
+                "persistence": "direct-write",
+                "paths": {str(worktree): "rw"},
+            },
+            "timeout_seconds": min(timeout_seconds, 600),
+        },
+    )
+    payload = dict(tool_result.output_json or {})
+    if tool_result.error:
+        raise CodingWorkflowError(f"bwrap sandbox failed: {tool_result.error}")
+    if (
+        payload.get("sandboxed") is not True
+        or payload.get("degraded")
+        or payload.get("persistence") != "direct-write"
+        or payload.get("cwd") != str(worktree)
+        or not isinstance(payload.get("writable_paths"), list)
+        or str(worktree) not in payload["writable_paths"]
+        or type(payload.get("return_code")) is not int
+    ):
+        raise CodingWorkflowError("bwrap sandbox did not verify the writable worktree check.")
+    return ProcessResult(
+        return_code=int(payload["return_code"]),
+        stdout=tool_result.output_text or "",
+        stderr=str(payload.get("stderr", "")),
+        timed_out=bool(payload.get("timed_out", False)),
+        output_truncated=bool(payload.get("truncated", False)),
+    )
+
+
+def workspace_python(worktree: Path) -> Path:
+    """Return the platform-specific interpreter owned by the worktree venv."""
+
+    return worktree / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+def expand_check_argv(check: CodingCheck, *, worktree: Path) -> tuple[str, ...]:
+    """Resolve the sole preparation-aware command placeholder."""
+
+    return tuple(
+        str(workspace_python(worktree)) if part == "{workspace_python}" else part
+        for part in check.argv
+    )
+
+
+def preparation_recipe_digest(recipe: CodingPreparationRecipe) -> str:
+    """Hash the exact finite recipe selected by session policy."""
+
+    payload = json.dumps(recipe.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def dependency_manifest_digest(worktree: Path, *, config: CodingPackConfig) -> str:
+    """Hash the bounded uv manifests that determine the local environment."""
+
+    digest = hashlib.sha256()
+    found = False
+    for name in ("pyproject.toml", "uv.lock"):
+        path = worktree / name
+        if not path.is_file():
+            continue
+        payload = path.read_bytes()
+        if len(payload) > config.max_file_bytes:
+            raise CodingWorkflowError(f"Dependency manifest exceeds byte limit: {name}")
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(payload)
+        digest.update(b"\0")
+        found = True
+    if not found:
+        raise CodingWorkflowError("No dependency manifest exists in the worktree.")
+    return digest.hexdigest()
+
+
+def preparation_is_current(
+    artifact: WorkProduct, *, worktree: Path, config: CodingPackConfig
+) -> bool:
+    """Require current configuration, manifests, and owned interpreter evidence."""
+
+    if not config.preparation_recipes:
+        return True
+    preparation = artifact.preparation
+    if preparation is None or preparation.status != "ready":
+        return False
+    try:
+        recipe = config.preparation_recipe(preparation.recipe_id)
+        return (
+            preparation.recipe_digest == preparation_recipe_digest(recipe)
+            and preparation.dependency_manifest_digest
+            == dependency_manifest_digest(worktree, config=config)
+            and Path(preparation.python_path).absolute() == workspace_python(worktree).absolute()
+            and workspace_python(worktree).is_file()
+        )
+    except (OSError, ValueError, CodingWorkflowError):
+        return False
 
 
 async def run_git(
@@ -206,14 +353,58 @@ async def readable_root(
     ctx: ToolExecutionContext,
     *,
     artifact_id: str | None,
+    scope: Literal["auto", "source", "worktree"] = "auto",
     config: CodingPackConfig,
-) -> Path:
-    """Return the source root or a validated owned worktree for read operations."""
+) -> ReadableRoot:
+    """Resolve a safe source/worktree read target without stale fallback."""
 
-    if artifact_id is None:
-        return config.resolve_workspace_root()
-    artifact = await load_owned_artifact(ctx, artifact_id=artifact_id, config=config)
-    return artifact_worktree(artifact, config=config)
+    source_root = config.resolve_workspace_root()
+    if artifact_id is not None:
+        if scope == "source":
+            raise CodingWorkflowError("artifact_id cannot be combined with source scope.")
+        artifact = await load_owned_artifact(ctx, artifact_id=artifact_id, config=config)
+        return ReadableRoot(
+            path=artifact_worktree(artifact, config=config),
+            scope="worktree",
+            artifact_id=artifact.artifact_id,
+        )
+    if scope == "source":
+        return ReadableRoot(path=source_root, scope="source")
+
+    store = ctx.code_change_artifact_store
+    if store is None:
+        if scope == "worktree":
+            raise CodingWorkflowError("No code change artifact store is available.")
+        return ReadableRoot(path=source_root, scope="source")
+    artifacts = [
+        artifact
+        for artifact in await cast(WorkProductStore, store).list_owned(ctx)
+        if Path(artifact.source_root).resolve() == source_root
+    ]
+    task_id = getattr(ctx, "task_id", "")
+    if not task_id:
+        if artifacts:
+            raise CodingWorkflowError(
+                "Cannot select a worktree without task_id; use source scope or artifact_id."
+            )
+        if scope == "worktree":
+            raise CodingWorkflowError("worktree scope requires artifact_id or task_id.")
+        return ReadableRoot(path=source_root, scope="source")
+    task_artifacts = [artifact for artifact in artifacts if artifact.task_id == task_id]
+    if not task_artifacts:
+        if scope == "worktree":
+            raise CodingWorkflowError("No owned worktree exists for this task.")
+        return ReadableRoot(path=source_root, scope="source")
+    if len(task_artifacts) != 1:
+        raise CodingWorkflowError(
+            "Multiple owned worktrees exist for this task; provide artifact_id explicitly."
+        )
+    artifact = task_artifacts[0]
+    return ReadableRoot(
+        path=artifact_worktree(artifact, config=config),
+        scope="worktree",
+        artifact_id=artifact.artifact_id,
+    )
 
 
 def artifact_branch_is_allowed(artifact: WorkProduct, config: CodingPackConfig) -> bool:

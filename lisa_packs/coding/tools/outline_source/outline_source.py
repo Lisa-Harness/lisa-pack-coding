@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import re
+from typing import Literal
 
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import get_coding_config
@@ -46,6 +47,7 @@ class Parameters(BaseModel):
     """Structured source outline request."""
 
     artifact_id: str | None = Field(default=None, min_length=1, max_length=100)
+    scope: Literal["auto", "source", "worktree"] = "auto"
     path: str = Field(min_length=1)
 
 
@@ -130,8 +132,10 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     params = Parameters.model_validate(ctx.parameters)
     try:
         config = get_coding_config(ctx)
-        root = await readable_root(ctx, artifact_id=params.artifact_id, config=config)
-        path = resolve_relative_path_at_root(root, params.path)
+        read_root = await readable_root(
+            ctx, artifact_id=params.artifact_id, scope=params.scope, config=config
+        )
+        path = resolve_relative_path_at_root(read_root.path, params.path)
         if not path.is_file():
             return ToolResult(tool_id=TOOL_ID, error="Requested path is not a file.")
         text, _ = read_text_file(path, max_bytes=config.max_file_bytes)
@@ -153,5 +157,10 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     return ToolResult(
         tool_id=TOOL_ID,
         output_text=f"Extracted {len(outline)} structural items from {params.path}.",
-        output_json={"path": params.path, "items": outline},
+        output_json={
+            "path": params.path,
+            "items": outline,
+            "scope": read_root.scope,
+            "artifact_id": read_root.artifact_id,
+        },
     )

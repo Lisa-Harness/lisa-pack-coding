@@ -4,8 +4,3 @@ description: "Extract a bounded source outline from the source workspace or an o
 exportable: true
 effect: read
 max_calls_per_turn: 50
-# One-line abbreviation returned when the model re-outlines the same
-# file within a single turn. Reuses the tool's own output_text
-# ("Extracted N structural items from PATH.") so the count is
-# preserved without duplicating the outline in the message history.
-abbreviation_template: "{output_text} (already outlined this turn; see prior result)"

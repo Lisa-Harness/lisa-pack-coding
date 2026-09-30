@@ -34,6 +34,8 @@ _READ_TOOLS = {
 _LOCAL_WRITE_TOOLS = {
     "coding_create_worktree",
     "coding_apply_patch",
+    "coding_edit_files",
+    "coding_prepare_workspace",
     "coding_run_check",
     "coding_commit",
     "coding_cleanup_worktree",

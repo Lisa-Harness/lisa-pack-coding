@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import get_coding_config
+from lisa_packs.coding.workflow import CodingWorkflowError, readable_root
 from sdk.content import (
     AgentFile,
     CopilotInstructionsFile,
@@ -40,6 +41,8 @@ class Parameters(BaseModel):
             "instructions whose applyTo glob matches this path are returned."
         ),
     )
+    artifact_id: str | None = Field(default=None, min_length=1, max_length=100)
+    scope: Literal["auto", "source", "worktree"] = "auto"
     kind: KindFilter = Field(
         default="all",
         description="Restrict the result to one customization kind.",
@@ -52,8 +55,11 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     params = Parameters.model_validate(ctx.parameters)
     try:
         config = get_coding_config(ctx)
-        workspace_root = config.resolve_workspace_root()
-    except (ValueError, OSError) as exc:
+        read_root = await readable_root(
+            ctx, artifact_id=params.artifact_id, scope=params.scope, config=config
+        )
+        workspace_root = read_root.path
+    except (CodingWorkflowError, ValueError, OSError) as exc:
         return ToolResult(tool_id=TOOL_ID, error=str(exc))
 
     bundle = discover_copilot_customizations(workspace_root)
@@ -61,6 +67,8 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
 
     output: dict[str, Any] = {
         "workspace_root": str(workspace_root),
+        "scope": read_root.scope,
+        "artifact_id": read_root.artifact_id,
         "file_path_filter": params.file_path,
         "kind_filter": kind,
         "always_on": [

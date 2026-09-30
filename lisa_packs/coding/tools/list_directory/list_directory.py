@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.local_files import (
@@ -20,6 +22,7 @@ class Parameters(BaseModel):
     """Structured directory listing request."""
 
     artifact_id: str | None = Field(default=None, min_length=1, max_length=100)
+    scope: Literal["auto", "source", "worktree"] = "auto"
     path: str = Field(default="", description="Relative workspace directory, or empty for root.")
     max_entries: int = Field(default=100, ge=1, le=1000)
 
@@ -30,7 +33,10 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     params = Parameters.model_validate(ctx.parameters)
     try:
         config = get_coding_config(ctx)
-        root = await readable_root(ctx, artifact_id=params.artifact_id, config=config)
+        read_root = await readable_root(
+            ctx, artifact_id=params.artifact_id, scope=params.scope, config=config
+        )
+        root = read_root.path
         directory = resolve_relative_path_at_root(root, params.path, allow_root=True)
         if not directory.is_dir():
             return ToolResult(tool_id=TOOL_ID, error="Requested path is not a directory.")
@@ -60,5 +66,9 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     return ToolResult(
         tool_id=TOOL_ID,
         output_text=f"Listed {len(entries)} entries.",
-        output_json={"entries": entries},
+        output_json={
+            "entries": entries,
+            "scope": read_root.scope,
+            "artifact_id": read_root.artifact_id,
+        },
     )
