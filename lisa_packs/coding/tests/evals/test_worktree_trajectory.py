@@ -92,6 +92,37 @@ async def _step(
 
 @pytest.mark.eval
 @pytest.mark.asyncio
+async def test_rejected_patch_can_be_corrected_without_mutating_first(
+    tmp_path: Path,
+    catalog: dict[str, dict[str, object]],
+) -> None:
+    repo = await git_repo(tmp_path)
+    factory = ToolContextFactory(root=repo.root, pack_config=_config(repo.root))
+    created = await run_tool(catalog, "coding_create_worktree", factory, {"summary": "format test"})
+    artifact_id = str(created.result.output_json["artifact_id"])
+    worktree = Path(str(created.result.output_json["worktree_path"]))
+    rejected = await run_tool(
+        catalog, "coding_apply_patch", factory,
+        {
+            "artifact_id": artifact_id,
+            "patch": "*** Begin Patch\n*** Update File: app.txt\n@@\n-hello\n+fixed\n*** End Patch",
+        },
+    )
+    assert "unified diff file path" in rejected.result.error
+    artifact = await factory.artifact_store.get(artifact_id)
+    assert artifact is not None and artifact.revision == 0
+    assert (worktree / "app.txt").read_text(encoding="utf-8") == "hello\n"
+    corrected = await run_tool(
+        catalog, "coding_apply_patch", factory, {"artifact_id": artifact_id, "patch": PATCH}
+    )
+    assert corrected.result.error == ""
+    assert corrected.result.output_json["revision"] == 1
+    assert (worktree / "app.txt").read_text(encoding="utf-8") == "hello from lisa\n"
+    assert "Do not use *** Begin Patch" in catalog["coding_apply_patch"]["description"]
+
+
+@pytest.mark.eval
+@pytest.mark.asyncio
 async def test_full_worktree_trajectory(
     tmp_path: Path,
     catalog: dict[str, dict[str, object]],
