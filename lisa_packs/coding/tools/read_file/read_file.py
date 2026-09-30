@@ -5,14 +5,16 @@ from __future__ import annotations
 from typing import Literal
 
 from kernel.models import ToolExecutionContext, ToolResult
+from pydantic import BaseModel, Field
+
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.local_files import (
     CodingPathError,
     read_text_file,
+    read_utf8_file_snapshot,
     resolve_relative_path_at_root,
 )
 from lisa_packs.coding.workflow import CodingWorkflowError, readable_root
-from pydantic import BaseModel, Field
 
 TOOL_ID = "coding_read_file"
 
@@ -39,7 +41,12 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         path = resolve_relative_path_at_root(read_root.path, params.path)
         if not path.is_file():
             return ToolResult(tool_id=TOOL_ID, error="Requested path is not a file.")
-        text, byte_truncated = read_text_file(path, max_bytes=config.max_file_bytes)
+        content_sha256: str | None = None
+        try:
+            text, content_sha256 = read_utf8_file_snapshot(path, max_bytes=config.max_file_bytes)
+            byte_truncated = False
+        except CodingPathError:
+            text, byte_truncated = read_text_file(path, max_bytes=config.max_file_bytes)
     except (CodingPathError, CodingWorkflowError, OSError, ValueError) as exc:
         return ToolResult(tool_id=TOOL_ID, error=str(exc))
 
@@ -57,6 +64,8 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             "path": params.path,
             "scope": read_root.scope,
             "artifact_id": read_root.artifact_id,
+            "content_sha256": content_sha256,
+            "editable": content_sha256 is not None,
             "start_line": start_line,
             "end_line": excerpt[-1]["line"] if excerpt else start_line,
             "total_lines_observed": len(all_lines),

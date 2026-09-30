@@ -29,7 +29,7 @@ dev = [
 markers = [
     "live: hits real external signal or provider APIs and prints a tester-visible summary",
     "integration: multi-module in-process test; may require local services",
-    "eval: deterministic agent regression evals (no model calls, no I/O)",
+    "eval: deterministic tool-workflow regressions (no model calls; local Git and sandbox I/O)",
 ]
 
 [project.entry-points."lisa.extensions.content_roots"]

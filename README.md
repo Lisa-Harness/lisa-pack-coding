@@ -23,7 +23,7 @@ No modes, no operations — a deliberate **tool-only surface** plus two host
 commands. (The legacy `coding`/`learn` modes were removed; [test_catalog.py](
 lisa_packs/coding/tests/test_catalog.py) asserts this shape so it stays honest.)
 
-Thirteen tools, in two families:
+Fifteen tools, in two families:
 
 ### Git-workflow tools (the artifact lifecycle)
 
@@ -33,7 +33,9 @@ owned worktree, never the source checkout.
 | Tool | Effect | Approval | Role |
 | --- | --- | --- | --- |
 | `coding_create_worktree` | write | ✓ | Mint a task-bound artifact + `git worktree add` an isolated branch `<prefix><artifact_id>` at the source `HEAD`. Worktree lives at `<source-parent>/.lisa-worktrees/<id>` — **outside** the source tree, enforced. |
+| `coding_edit_files` | write | ✓ | Apply exact, hash-guarded replacements, creates, or deletes as one revision. The tool generates and prevalidates the Git patch. |
 | `coding_apply_patch` | write | ✓ | Prevalidate (`git apply --check`) and apply a bounded unified diff. Bumps `revision`, records `changed_paths`, **clears `checks`** (stale results are invalidated). |
+| `coding_prepare_workspace` | write | ✓ | Run a configured locked Python/uv preparation recipe in the owned sandbox and record preparation evidence. |
 | `coding_run_check` | write | ✓ | Run one named check through the bwrap owner's direct-write sandbox floor. Result records the current revision and candidate-tree hash; no host fallback. |
 | `coding_commit` | write | ✓ | Stage commit candidates and commit only after required checks passed for this revision and tree, on the owned unprotected branch. No newline in the message. |
 | `coding_push` | external_write | ✓ | Push the checked feature branch upstream (`push_remote`). **No force option exists.** |
@@ -44,8 +46,12 @@ owned worktree, never the source checkout.
 
 Bounded, path-validated, non-following of symlinks, with an exclusion list
 (`.git`, `.venv`, `node_modules`, `build`, `dist`, cache dirs). All are
-`effect: read` with per-turn call caps and an `abbreviation_template` so a
-repeat within one turn returns a one-line cache hit instead of re-reading.
+`effect: read` with per-turn call caps. Task-bound reads default to the owned
+worktree and reread mutable content; source reads remain available explicitly.
+Complete valid UTF-8 files return `content_sha256` and `editable: true`, even
+when only a line window is shown. Pass that whole-file hash as
+`expected_sha256` to `coding_edit_files`. Truncated or invalid UTF-8 reads are
+not edit-ready and return no hash.
 
 | Tool | Effect | Cap | Role |
 | --- | --- | --- | --- |
@@ -74,7 +80,7 @@ startup) and **degrades gracefully** to `(none)` on failure.
 The intended pipeline, each step enforced in code:
 
 ```text
-create_worktree ─▶ apply_patch ─▶ run_check ─▶ commit ─▶ push ─▶ (github pack opens PR)
+create_worktree ─▶ edit_files ─▶ run_check ─▶ commit ─▶ push ─▶ (github pack opens PR)
                   (revision +1)   (at this    (all required  ─┘
                                    revision)   checks green)
 ```
@@ -310,11 +316,50 @@ cd coding
 ```
 
 Markers: `live` (real external signal/provider), `integration` (multi-module,
-may need services), `eval` (deterministic agent regression evals, no model
-calls/I/O — see [tests/evals/](lisa_packs/coding/tests/evals/)). Entry points:
+may need services), `eval` (deterministic tool-workflow regressions, no model
+calls; local Git and sandbox I/O — see [tests/evals/](lisa_packs/coding/tests/evals/)). Entry points:
 `lisa.extensions.content_roots` → `lisa_packs.coding:get_content_root`, and
 `lisa.extensions.host_commands` →
 `lisa_packs.coding.copilot_commands:get_host_commands`.
+
+### Repeatable Go workflow tests
+
+With the framework development environment, a sibling `lisa-packs/bwrap`
+checkout, Go 1.23+, and bubblewrap available, run:
+
+```bash
+cd coding
+../../lisa/.venv/bin/python -m pytest \
+  lisa_packs/coding/tests/evals/test_worktree_trajectory.py::test_real_go_worktree_repair_trajectory \
+  -q -rs -p no:cacheprovider
+```
+
+This offline packstest case dispatches the actual coding and bwrap tools:
+create, read, structured edit, failing Go test, rejected commit, fresh read,
+repair, passing test, commit, push to a disposable local bare remote, and
+cleanup. Missing local prerequisites produce an explicit skip, not a mock.
+
+The remembered dnsmasq-web hygiene task has a separate opt-in acceptance case:
+
+```bash
+LISA_CODING_GO_PROJECT=/path/to/dnsmasq-web \
+  ../../lisa/.venv/bin/python -m pytest \
+  lisa_packs/coding/tests/evals/test_worktree_trajectory.py::test_dnsmasq_web_hygiene_workflow \
+  -q -s -p no:cacheprovider --basetemp="$(mktemp -d /tmp/dnsmasq-packstest.XXXXXX)"
+```
+
+It needs Go 1.23.12, a C compiler, and cached dependencies at `~/go/pkg/mod`
+(override with `LISA_CODING_GO_MODULE_CACHE`). Modules are read-only; network
+downloads are disabled. Go build and temporary files stay under the new
+worktree's ignored `.toolchains/packstest` directory. It runs baseline tests,
+structured hygiene edits, scoped formatting, `go vet ./...`, and fresh
+`go test -count=1 ./...`, then reports a JSON trajectory and retained worktree.
+It never commits, pushes, or takes over an existing Lisa artifact. The source
+checkout, including pre-existing changes, is checked for preservation.
+
+These cases certify tool behavior, not model task completion or host approval
+replay. The real-project case leaves a new worktree on each run; inspect and
+remove only those test-owned worktrees when no longer needed.
 
 ## How this pack fits the group
 

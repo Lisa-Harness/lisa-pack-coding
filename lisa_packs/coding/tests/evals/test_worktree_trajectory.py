@@ -9,6 +9,7 @@ fields. Deterministic: the only I/O is Git inside tmp dirs; no model calls.
 
 from __future__ import annotations
 
+import os
 import shutil
 from collections.abc import Mapping
 from pathlib import Path
@@ -18,9 +19,12 @@ from kernel.capability_binding import ExecutionFloorView
 from kernel.models import ToolResult
 from packstest.catalog import build_tool_catalog
 from packstest.context import ToolContextFactory
-from packstest.git import git_repo
-from packstest.report import Trajectory
+from packstest.git import GitRepoFixture, git_repo
+from packstest.report import Trajectory, write_trajectory
 from packstest.runner import ToolRun, run_tool
+
+from lisa_packs.coding.config import get_coding_config
+from lisa_packs.coding.workflow import run_git
 
 PACK_PATH = Path(__file__).resolve().parents[4]
 SHA1_HEX_LENGTH = 40
@@ -90,6 +94,491 @@ async def _step(
     return run
 
 
+def _real_sandbox(
+    factory: ToolContextFactory, *, bwrap_path: Path, read_only_paths: tuple[Path, ...] = ()
+) -> ToolContextFactory:
+    """Dispatch contained commands through the real bwrap pack, without mocks."""
+
+    paths = {
+        str(factory.root): "ro",
+        str(factory.root.parent / ".lisa-worktrees"): "rw",
+        **{str(path): "ro" for path in read_only_paths},
+    }
+    floor = {
+        "execution": "sandbox",
+        "persistence": "direct-write",
+        "paths": paths,
+    }
+    factory.execution_floor_for = lambda _tool_id: ExecutionFloorView(
+        execution="sandbox",
+        persistence="direct-write",
+        paths=paths,
+    )
+    bwrap_catalog = build_tool_catalog(bwrap_path)
+    bwrap_factory = ToolContextFactory(
+        root=factory.root,
+        pack_config={"workspace_root": str(factory.root), "sandbox": {"floor": floor}},
+        identity=factory.identity,
+        data_dir=factory.data_dir,
+    )
+
+    async def dispatch(tool_id: str, parameters: Mapping[str, object]) -> ToolResult:
+        return (await run_tool(bwrap_catalog, tool_id, bwrap_factory, dict(parameters))).result
+
+    factory.delegated_tool_dispatch = dispatch
+    return bwrap_factory
+
+
+async def _greeting_repo(tmp_path: Path) -> tuple[GitRepoFixture, str]:
+    """Seed the offline Go fixture without network dependencies."""
+
+    repo = await git_repo(tmp_path)
+    await repo.commit_file(".gitignore", ".lisa-go-cache/\n.lisa-go-path/\n", "ignore Go runtime")
+    await repo.commit_file("go.mod", "module example.invalid/greeting\n\ngo 1.23.0\n", "Go module")
+    original = 'package greeting\n\nfunc Greeting() string { return "hello" }\n'
+    test_source = (
+        'package greeting\n\nimport "testing"\n\n'
+        "func TestGreeting(t *testing.T) {\n"
+        '    if got := Greeting(); got != "hello" { t.Fatalf("unexpected greeting: %s", got) }\n'
+        "}\n"
+    )
+    await repo.commit_file("greeting.go", original, "initial greeting")
+    await repo.commit_file("greeting_test.go", test_source, "initial check")
+    return repo, original
+
+
+@pytest.mark.eval
+@pytest.mark.asyncio
+async def test_real_go_worktree_repair_trajectory(
+    tmp_path: Path,
+    catalog: dict[str, dict[str, object]],
+) -> None:
+    """Real Go failures block commit until a structured repair passes in bwrap."""
+
+    bwrap_path = PACK_PATH.parent.parent / "lisa-packs" / "bwrap"
+    if not bwrap_path.is_dir() or shutil.which("bwrap") is None or shutil.which("go") is None:
+        pytest.skip("This offline integration requires the bwrap checkout, bwrap, and Go.")
+    repo, original = await _greeting_repo(tmp_path)
+    source_head = await repo.head()
+    config = {
+        "workspace_root": str(repo.root),
+        "checks": [{"id": "go-test", "argv": ["go", "test", "./..."], "timeout_seconds": 120}],
+        "required_check_ids": ["go-test"],
+    }
+    factory = ToolContextFactory(root=repo.root, pack_config=config, data_dir=tmp_path / "data")
+    factory.identity["task_id"] = "go-repair-task"
+    _real_sandbox(factory, bwrap_path=bwrap_path)
+    trajectory = Trajectory(name="real-go-repair")
+    created = await _step(
+        catalog, factory, trajectory, "coding_create_worktree", {"summary": "Go repair"}
+    )
+    assert created.result.error == "", created.result.error
+    artifact_id = str(created.result.output_json["artifact_id"])
+    worktree = Path(str(created.result.output_json["worktree_path"]))
+    factory.pack_config["checks"] = [
+        {
+            "id": "go-test",
+            "argv": [
+                "env",
+                f"GOCACHE={worktree / '.lisa-go-cache'}",
+                f"GOPATH={worktree / '.lisa-go-path'}",
+                "GOTOOLCHAIN=local",
+                "GOPROXY=off",
+                "GOSUMDB=off",
+                "go",
+                "test",
+                "-count=1",
+                "./...",
+            ],
+            "timeout_seconds": 120,
+        }
+    ]
+    baseline = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_run_check",
+        {"artifact_id": artifact_id, "check_id": "go-test"},
+    )
+    assert baseline.result.error == "", baseline.result.error
+    assert baseline.result.output_json["status"] == "passed"
+    source_read = await _step(
+        catalog, factory, trajectory, "coding_read_file", {"path": "greeting.go"}
+    )
+    test_read = await _step(
+        catalog, factory, trajectory, "coding_read_file", {"path": "greeting_test.go"}
+    )
+    assert source_read.result.output_json["scope"] == "worktree"
+    edited = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_edit_files",
+        {
+            "artifact_id": artifact_id,
+            "edits": [
+                {
+                    "kind": "update",
+                    "path": "greeting.go",
+                    "expected_sha256": source_read.result.output_json["content_sha256"],
+                    "replacements": [{"old_text": 'return "hello"', "new_text": 'return "broken"'}],
+                },
+                {
+                    "kind": "update",
+                    "path": "greeting_test.go",
+                    "expected_sha256": test_read.result.output_json["content_sha256"],
+                    "replacements": [
+                        {"old_text": 'got != "hello"', "new_text": 'got != "hello from lisa"'}
+                    ],
+                },
+            ],
+        },
+    )
+    assert edited.result.error == "", edited.result.error
+    failed = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_run_check",
+        {"artifact_id": artifact_id, "check_id": "go-test"},
+    )
+    assert failed.result.error == "", failed.result.error
+    assert failed.result.output_json["status"] == "failed"
+    blocked = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_commit",
+        {
+            "artifact_id": artifact_id,
+            "message": "must not commit failing code",
+        },
+    )
+    assert "Every required check must pass" in blocked.result.error
+    evidence = await _step(
+        catalog, factory, trajectory, "coding_status", {"artifact_id": artifact_id}
+    )
+    assert "unexpected greeting: broken" in str(evidence.result.output_json["checks"])
+    fresh = await _step(catalog, factory, trajectory, "coding_read_file", {"path": "greeting.go"})
+    assert (
+        fresh.result.output_json["content_sha256"]
+        != source_read.result.output_json["content_sha256"]
+    )
+    repaired = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_edit_files",
+        {
+            "artifact_id": artifact_id,
+            "edits": [
+                {
+                    "kind": "update",
+                    "path": "greeting.go",
+                    "expected_sha256": fresh.result.output_json["content_sha256"],
+                    "replacements": [
+                        {"old_text": 'return "broken"', "new_text": 'return "hello from lisa"'}
+                    ],
+                }
+            ],
+        },
+    )
+    assert repaired.result.error == "", repaired.result.error
+    passed = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_run_check",
+        {"artifact_id": artifact_id, "check_id": "go-test"},
+    )
+    assert passed.result.error == "", passed.result.error
+    assert passed.result.output_json["status"] == "passed"
+    committed = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_commit",
+        {
+            "artifact_id": artifact_id,
+            "message": "fix: greet from the owned Go worktree",
+        },
+    )
+    assert committed.result.error == "", committed.result.error
+    published = await _step(
+        catalog, factory, trajectory, "coding_push", {"artifact_id": artifact_id}
+    )
+    assert published.result.error == "", published.result.error
+    assert published.result.output_json["pushed_sha"] == committed.result.output_json["commit_sha"]
+    cleaned = await _step(
+        catalog, factory, trajectory, "coding_cleanup_worktree", {"artifact_id": artifact_id}
+    )
+    assert cleaned.result.error == "", cleaned.result.error
+    assert not worktree.exists()
+    assert await repo.head() == source_head
+    assert (repo.root / "greeting.go").read_text(encoding="utf-8") == original
+    assert [entry["result_error"] for entry in trajectory.entries if entry["result_error"]] == [
+        blocked.result.error
+    ]
+
+
+async def _source_snapshot(factory: ToolContextFactory) -> tuple[str, ...]:
+    """Capture source HEAD, tracked content, and status without changing its index."""
+
+    config = get_coding_config(factory.context())
+    snapshot = []
+    for argv in (("rev-parse", "HEAD"), ("diff", "HEAD", "--binary"), ("status", "--porcelain")):
+        result = await run_git(factory.root, argv, config=config)
+        assert result.return_code == 0 and not result.output_truncated
+        snapshot.append(result.stdout)
+    return tuple(snapshot)
+
+
+async def _prepare_go_checks(
+    bwrap_catalog: dict[str, dict[str, object]],
+    sandbox_factory: ToolContextFactory,
+    factory: ToolContextFactory,
+    trajectory: Trajectory,
+    worktree: Path,
+    *,
+    module_cache: Path,
+    targets: list[str],
+) -> dict[str, object]:
+    """Prepare only ignored writable runtime paths and finite offline Go checks."""
+
+    runtime_root = worktree / ".toolchains" / "packstest"
+    overrides: dict[str, object] = {"persistence": "direct-write", "paths": {str(worktree): "rw"}}
+    setup = await _step(
+        bwrap_catalog,
+        sandbox_factory,
+        trajectory,
+        "bwrap_run",
+        {
+            "argv": ["mkdir", "-p", str(runtime_root / "tmp")],
+            "cwd": str(worktree),
+            "overrides": overrides,
+            "timeout_seconds": 30,
+        },
+    )
+    assert setup.result.error == "", setup.result.error
+    assert setup.result.output_json["return_code"] == 0
+    environment = [
+        "env",
+        f"GOCACHE={runtime_root / 'go-build'}",
+        f"GOPATH={runtime_root / 'go'}",
+        f"GOMODCACHE={module_cache}",
+        f"TMPDIR={runtime_root / 'tmp'}",
+        "GOTOOLCHAIN=local",
+        "GOPROXY=off",
+        "GOSUMDB=off",
+        "CGO_ENABLED=1",
+    ]
+    factory.pack_config["checks"] = [
+        {"id": "gofmt", "argv": ["gofmt", "-l", *targets], "timeout_seconds": 30},
+        {"id": "go-vet", "argv": [*environment, "go", "vet", "./..."], "timeout_seconds": 300},
+        {
+            "id": "go-test",
+            "argv": [*environment, "go", "test", "-count=1", "./..."],
+            "timeout_seconds": 300,
+        },
+    ]
+    return overrides
+
+
+@pytest.mark.eval
+@pytest.mark.asyncio
+async def test_dnsmasq_web_hygiene_workflow(
+    tmp_path: Path,
+    catalog: dict[str, dict[str, object]],
+) -> None:
+    """Opt in to the remembered Go hygiene task in a fresh real-project worktree."""
+
+    project = os.environ.get("LISA_CODING_GO_PROJECT")
+    if not project:
+        pytest.skip("Set LISA_CODING_GO_PROJECT to opt into the real dnsmasq-web task.")
+    root = Path(project).expanduser().resolve()
+    module_cache = Path(
+        os.environ.get("LISA_CODING_GO_MODULE_CACHE", str(Path.home() / "go/pkg/mod"))
+    )
+    bwrap_path = PACK_PATH.parent.parent / "lisa-packs" / "bwrap"
+    factory = ToolContextFactory(
+        root=root,
+        pack_config={
+            "workspace_root": str(root),
+            "checks": [{"id": "go-test", "argv": ["go", "test", "./..."], "timeout_seconds": 300}],
+            "required_check_ids": ["go-test"],
+        },
+        data_dir=tmp_path / "data",
+    )
+    factory.identity["task_id"] = "dnsmasq-web-hygiene"
+    before = await _source_snapshot(factory)
+    sandbox_factory = _real_sandbox(factory, bwrap_path=bwrap_path, read_only_paths=(module_cache,))
+    bwrap_catalog = build_tool_catalog(bwrap_path)
+    trajectory = Trajectory(name="dnsmasq-web-hygiene")
+    created = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_create_worktree",
+        {"summary": "Go hygiene task from Lisa's retained thread"},
+    )
+    assert created.result.error == "", created.result.error
+    artifact_id = str(created.result.output_json["artifact_id"])
+    worktree = Path(str(created.result.output_json["worktree_path"]))
+    targets = ["internal/client/http.go", "token_gin.go", "token_test.go"]
+    overrides = await _prepare_go_checks(
+        bwrap_catalog,
+        sandbox_factory,
+        factory,
+        trajectory,
+        worktree,
+        module_cache=module_cache,
+        targets=targets,
+    )
+    baseline = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_run_check",
+        {
+            "artifact_id": artifact_id,
+            "check_id": "go-test",
+        },
+    )
+    assert baseline.result.error == "", baseline.result.error
+    assert baseline.result.output_json["status"] == "passed", baseline.result.output_json
+    replacements = {
+        "internal/client/http.go": [
+            {"old_text": '"net/http"\n', "new_text": '"net/http"\n\t"time"\n'},
+            {
+                "old_text": "SetTimeout(30 * 1e9). // 30 seconds",
+                "new_text": "SetTimeout(30 * time.Second).",
+            },
+            {"old_text": "SetRetryWaitTime(1 * 1e9)", "new_text": "SetRetryWaitTime(time.Second)"},
+            {
+                "old_text": "body interface{}, result interface{}",
+                "new_text": "body any, result any",
+            },
+            {
+                "old_text": "var errResp map[string]interface{}",
+                "new_text": "var errResp map[string]any",
+            },
+            {"old_text": "req := map[string]interface{}{", "new_text": "req := map[string]any{"},
+            {"old_text": "update map[string]interface{}", "new_text": "update map[string]any"},
+        ],
+        "token_gin.go": [
+            {
+                "old_text": (
+                    "r.GET(path, func(c *gin.Context) { c.String(http.StatusOK, ttc.Get()) })"
+                ),
+                "new_text": (
+                    "r.GET(path, func(c *gin.Context) {\n"
+                    "\t\tc.String(http.StatusOK, ttc.Get())\n\t})"
+                ),
+            }
+        ],
+        "token_test.go": [
+            {
+                "old_text": (
+                    "func TestTokenChecker_GetAfterTimeout(t *testing.T) {\n"
+                    "\tttc := NewTokenChecker(1, 2, time.Millisecond*2)"
+                ),
+                "new_text": (
+                    "func TestTokenChecker_GetAfterTimeout(t *testing.T) {\n"
+                    "\tttc := NewTokenChecker(1, 2, 2*time.Millisecond)"
+                ),
+            },
+            {
+                "old_text": (
+                    "func TestTokenChecker_CheckAfterTimeout(t *testing.T) {\n"
+                    "\tttc := NewTokenChecker(1, 2, time.Millisecond*2)"
+                ),
+                "new_text": (
+                    "func TestTokenChecker_CheckAfterTimeout(t *testing.T) {\n"
+                    "\tttc := NewTokenChecker(1, 2, 2*time.Millisecond)"
+                ),
+            },
+            {
+                "old_text": "time.Sleep(time.Millisecond * 3)\n\ttoken3 := ttc.Get()",
+                "new_text": "time.Sleep(3 * time.Millisecond)\n\ttoken3 := ttc.Get()",
+            },
+            {
+                "old_text": "token1 := ttc.Get()\n\ttime.Sleep(time.Millisecond * 3)",
+                "new_text": "token1 := ttc.Get()\n\ttime.Sleep(3 * time.Millisecond)",
+            },
+            {
+                "old_text": "}\nfunc TestTokenChecker_GetTooManyTokens",
+                "new_text": "}\n\nfunc TestTokenChecker_GetTooManyTokens",
+            },
+        ],
+    }
+    edits = []
+    for path in targets:
+        read = await _step(catalog, factory, trajectory, "coding_read_file", {"path": path})
+        assert read.result.error == "", read.result.error
+        assert read.result.output_json["scope"] == "worktree"
+        edits.append(
+            {
+                "kind": "update",
+                "path": path,
+                "expected_sha256": read.result.output_json["content_sha256"],
+                "replacements": replacements[path],
+            }
+        )
+    edited = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_edit_files",
+        {
+            "artifact_id": artifact_id,
+            "edits": edits,
+        },
+    )
+    assert edited.result.error == "", edited.result.error
+    formatted = await _step(
+        bwrap_catalog,
+        sandbox_factory,
+        trajectory,
+        "bwrap_run",
+        {
+            "argv": ["gofmt", "-w", *targets],
+            "cwd": str(worktree),
+            "overrides": overrides,
+            "timeout_seconds": 30,
+        },
+    )
+    assert formatted.result.error == "", formatted.result.error
+    assert formatted.result.output_json["return_code"] == 0
+    for check_id in ("gofmt", "go-vet", "go-test"):
+        checked = await _step(
+            catalog,
+            factory,
+            trajectory,
+            "coding_run_check",
+            {
+                "artifact_id": artifact_id,
+                "check_id": check_id,
+            },
+        )
+        assert checked.result.error == "", checked.result.error
+        assert checked.result.output_json["status"] == "passed", checked.result.output_json
+    artifact = await factory.artifact_store.get(artifact_id)
+    assert artifact is not None
+    assert artifact.checks["gofmt"].stdout.strip() == "(no output; rc=0)"
+    status = await _step(
+        catalog, factory, trajectory, "coding_status", {"artifact_id": artifact_id}
+    )
+    assert status.result.error == "", status.result.error
+    assert set(artifact.changed_paths) == set(targets)
+    assert await _source_snapshot(factory) == before
+    assert trajectory.all_errors_absent(), trajectory.first_error()
+    report = write_trajectory(trajectory, tmp_path)
+    print(
+        f"Checked worktree: {worktree}\nBranch: {artifact.branch}\n"
+        f"Trajectory: {report}\nNo commit or push."
+    )
+
+
 @pytest.mark.eval
 @pytest.mark.asyncio
 async def test_rejected_patch_can_be_corrected_without_mutating_first(
@@ -102,7 +591,9 @@ async def test_rejected_patch_can_be_corrected_without_mutating_first(
     artifact_id = str(created.result.output_json["artifact_id"])
     worktree = Path(str(created.result.output_json["worktree_path"]))
     rejected = await run_tool(
-        catalog, "coding_apply_patch", factory,
+        catalog,
+        "coding_apply_patch",
+        factory,
         {
             "artifact_id": artifact_id,
             "patch": "*** Begin Patch\n*** Update File: app.txt\n@@\n-hello\n+fixed\n*** End Patch",
