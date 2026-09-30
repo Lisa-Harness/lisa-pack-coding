@@ -361,6 +361,25 @@ These cases certify tool behavior, not model task completion or host approval
 replay. The real-project case leaves a new worktree on each run; inspect and
 remove only those test-owned worktrees when no longer needed.
 
+### Repeatable Python Preparation Test
+
+With the same framework and bwrap checkouts, uv, and the framework's Python
+version available locally, run from `coding`:
+
+```bash
+../../lisa/.venv/bin/python -m pytest \
+  lisa_packs/coding/tests/evals/test_worktree_trajectory.py::test_real_python_preparation_and_repair_trajectory \
+  -q -rs -p no:cacheprovider
+```
+
+This dependency-free offline fixture calls `coding_prepare_workspace` through
+real bwrap, checks the owned interpreter and import origins, and records
+baseline evidence. It then exercises hash-guarded edits, failing checks,
+blocked commit, repair, passing checks, commit, and cleanup. Missing ignore
+rules for `.venv/` or `.lisa-tmp/` must fail before creating runtime paths.
+The source checkout is preserved and the successful run writes a JSON
+trajectory under pytest's temporary directory. No model calls or downloads.
+
 ## How this pack fits the group
 
 The four related packs form one pipeline with clean seams — and **no

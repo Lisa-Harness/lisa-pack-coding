@@ -9,8 +9,10 @@ fields. Deterministic: the only I/O is Git inside tmp dirs; no model calls.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -319,6 +321,230 @@ async def test_real_go_worktree_repair_trajectory(
     assert [entry["result_error"] for entry in trajectory.entries if entry["result_error"]] == [
         blocked.result.error
     ]
+
+
+async def _python_preparation_fixture(
+    tmp_path: Path, unignored_path: str | None
+) -> ToolContextFactory:
+    """Seed an offline Python fixture with real sandbox dispatch."""
+
+    bwrap_path = PACK_PATH.parent.parent / "lisa-packs" / "bwrap"
+    if not bwrap_path.is_dir() or shutil.which("bwrap") is None or shutil.which("uv") is None:
+        pytest.skip("This offline integration requires the bwrap checkout, bwrap, and uv.")
+    repo = await git_repo(tmp_path, with_remote=False)
+    python_range = (
+        f">={sys.version_info.major}.{sys.version_info.minor}, "
+        f"<{sys.version_info.major}.{sys.version_info.minor + 1}"
+    )
+    files = {
+        ".gitignore": "".join(
+            path + "\n"
+            for path in (".venv/", ".lisa-tmp/", "__pycache__/")
+            if path != unignored_path
+        ),
+        ".python-version": sys.version.split()[0] + "\n",
+        "pyproject.toml": (
+            '[project]\nname = "prepared-fixture"\nversion = "0.1.0"\n'
+            f'requires-python = "{python_range}"\n'
+            '[tool.uv]\npackage = false\noffline = true\npython-downloads = "never"\n'
+        ),
+        "uv.lock": (
+            "version = 1\nrevision = 3\n"
+            f'requires-python = "{python_range}"\n'
+            '[[package]]\nname = "prepared-fixture"\nversion = "0.1.0"\n'
+            'source = { virtual = "." }\n'
+        ),
+        "app.py": 'def greeting() -> str:\n    return "hello"\n',
+        "test_app.py": (
+            "import unittest\nfrom app import greeting\n\n"
+            "class GreetingTest(unittest.TestCase):\n"
+            "    def test_greeting(self):\n"
+            '        self.assertEqual(greeting(), "hello")\n'
+        ),
+    }
+    for path, text in files.items():
+        await repo.commit_file(path, text, f"seed {path}")
+    factory = ToolContextFactory(
+        root=repo.root,
+        data_dir=tmp_path / "data",
+        pack_config={
+            "workspace_root": str(repo.root),
+            "checks": [
+                {
+                    "id": "unit",
+                    "argv": ["{workspace_python}", "-m", "unittest", "-v"],
+                    "timeout_seconds": 60,
+                }
+            ],
+            "required_check_ids": ["unit"],
+            "preparation_recipes": [
+                {
+                    "id": "python-uv",
+                    "project_modules": ["app"],
+                    "baseline_check_ids": ["unit"],
+                    "timeout_seconds": 60,
+                }
+            ],
+        },
+    )
+    factory.identity["task_id"] = "python-preparation-task"
+    _real_sandbox(factory, bwrap_path=bwrap_path, read_only_paths=(Path(sys.base_prefix),))
+    return factory
+
+
+async def _assert_python_preparation(
+    factory: ToolContextFactory, artifact_id: str, worktree: Path
+) -> None:
+    artifact = await factory.artifact_store.get(artifact_id)
+    assert artifact is not None and artifact.preparation is not None
+    preparation = artifact.preparation
+    assert preparation.status == "ready"
+    assert preparation.recipe_digest and preparation.dependency_manifest_digest
+    assert preparation.python_path == str(worktree / ".venv" / "bin" / "python")
+    assert json.loads(preparation.probe_stdout)["origins"] == {"app": str(worktree / "app.py")}
+    assert preparation.baseline_checks["unit"].status == "passed"
+    assert preparation.baseline_checks["unit"].checked_tree_sha == preparation.baseline_tree_sha
+    assert artifact.checks == {}
+
+
+@pytest.mark.eval
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unignored_path", [None, ".venv/", ".lisa-tmp/"])
+async def test_real_python_preparation_and_repair_trajectory(
+    tmp_path: Path,
+    catalog: dict[str, dict[str, object]],
+    unignored_path: str | None,
+) -> None:
+    """Actual uv preparation certifies origins before sandboxed repair and commit."""
+
+    factory = await _python_preparation_fixture(tmp_path, unignored_path)
+    source_snapshot = await _source_snapshot(factory)
+    trajectory = Trajectory(name="real-python-preparation-repair")
+    created = await _step(
+        catalog, factory, trajectory, "coding_create_worktree", {"summary": "Python repair"}
+    )
+    assert created.result.error == "", created.result.error
+    artifact_id = str(created.result.output_json["artifact_id"])
+    worktree = Path(str(created.result.output_json["worktree_path"]))
+    unprepared = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_run_check",
+        {"artifact_id": artifact_id, "check_id": "unit"},
+    )
+    assert "Workspace preparation is missing or stale" in unprepared.result.error
+    prepared = await _step(
+        catalog, factory, trajectory, "coding_prepare_workspace", {"artifact_id": artifact_id}
+    )
+    if unignored_path is not None:
+        assert f"{unignored_path.rstrip('/')} must be ignored" in prepared.result.error
+        rejected = await factory.artifact_store.get(artifact_id)
+        assert rejected is not None and rejected.preparation is not None
+        assert rejected.preparation.status == "failed"
+        assert not (worktree / ".venv").exists()
+        assert not (worktree / ".lisa-tmp").exists()
+        cleaned = await _step(
+            catalog, factory, trajectory, "coding_cleanup_worktree", {"artifact_id": artifact_id}
+        )
+        assert cleaned.result.error == "", cleaned.result.error
+        assert await _source_snapshot(factory) == source_snapshot
+        return
+    assert prepared.result.error == "", prepared.result.error
+    await _assert_python_preparation(factory, artifact_id, worktree)
+    for path, old_text, new_text in (
+        ("app.py", 'return "hello"', 'return "broken"'),
+        ("test_app.py", 'greeting(), "hello"', 'greeting(), "hello from lisa"'),
+    ):
+        read = await _step(catalog, factory, trajectory, "coding_read_file", {"path": path})
+        assert read.result.error == "", read.result.error
+        assert read.result.output_json["scope"] == "worktree"
+        edit = await _step(
+            catalog,
+            factory,
+            trajectory,
+            "coding_edit_files",
+            {
+                "artifact_id": artifact_id,
+                "edits": [
+                    {
+                        "kind": "update",
+                        "path": path,
+                        "expected_sha256": read.result.output_json["content_sha256"],
+                        "replacements": [{"old_text": old_text, "new_text": new_text}],
+                    }
+                ],
+            },
+        )
+        assert edit.result.error == "", edit.result.error
+    failed = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_run_check",
+        {"artifact_id": artifact_id, "check_id": "unit"},
+    )
+    assert failed.result.error == "", failed.result.error
+    assert failed.result.output_json["status"] == "failed"
+    blocked = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_commit",
+        {"artifact_id": artifact_id, "message": "must not commit failing Python"},
+    )
+    assert "Every required check must pass" in blocked.result.error
+    fresh = await _step(catalog, factory, trajectory, "coding_read_file", {"path": "app.py"})
+    assert fresh.result.error == "", fresh.result.error
+    repaired = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_edit_files",
+        {
+            "artifact_id": artifact_id,
+            "edits": [
+                {
+                    "kind": "update",
+                    "path": "app.py",
+                    "expected_sha256": fresh.result.output_json["content_sha256"],
+                    "replacements": [
+                        {"old_text": 'return "broken"', "new_text": 'return "hello from lisa"'}
+                    ],
+                }
+            ],
+        },
+    )
+    assert repaired.result.error == "", repaired.result.error
+    checked = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_run_check",
+        {"artifact_id": artifact_id, "check_id": "unit"},
+    )
+    assert checked.result.error == "", checked.result.error
+    assert checked.result.output_json["status"] == "passed"
+    committed = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_commit",
+        {"artifact_id": artifact_id, "message": "fix: greet from the prepared Python worktree"},
+    )
+    assert committed.result.error == "", committed.result.error
+    assert len(str(committed.result.output_json["commit_sha"])) == SHA1_HEX_LENGTH
+    cleaned = await _step(
+        catalog, factory, trajectory, "coding_cleanup_worktree", {"artifact_id": artifact_id}
+    )
+    assert cleaned.result.error == "", cleaned.result.error
+    assert not worktree.exists()
+    assert await _source_snapshot(factory) == source_snapshot
+    assert [entry["result_error"] for entry in trajectory.entries if entry["result_error"]] == [
+        unprepared.result.error,
+        blocked.result.error,
+    ]
+    write_trajectory(trajectory, tmp_path / "trajectory-python-preparation-repair.json")
 
 
 async def _source_snapshot(factory: ToolContextFactory) -> tuple[str, ...]:

@@ -63,7 +63,7 @@ def _is_uv_project(worktree: Path) -> bool:
 
 async def _require_ignored_runtime_paths(worktree: Path, *, config) -> None:
     for path in (".venv", ".lisa-tmp"):
-        result = await run_git(worktree, ("check-ignore", "-q", "--", path), config=config)
+        result = await run_git(worktree, ("check-ignore", "-q", "--", f"{path}/"), config=config)
         if result.return_code != 0:
             raise CodingWorkflowError(f"{path} must be ignored before preparing a workspace.")
 
@@ -105,9 +105,13 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         artifact = await load_owned_artifact(ctx, artifact_id=params.artifact_id, config=config)
         worktree = artifact_worktree(artifact, config=config)
         if not _is_uv_project(worktree):
-            raise CodingWorkflowError("Preparation supports only uv projects with uv.lock or [tool.uv].")
+            raise CodingWorkflowError(
+                "Preparation supports only uv projects with uv.lock or [tool.uv]."
+            )
         if not (worktree / "uv.lock").is_file():
-            raise CodingWorkflowError("uv preparation requires a committed uv.lock for --locked sync.")
+            raise CodingWorkflowError(
+                "uv preparation requires a committed uv.lock for --locked sync."
+            )
         await _require_ignored_runtime_paths(worktree, config=config)
         manifest_digest = dependency_manifest_digest(worktree, config=config)
         recipe_digest = preparation_recipe_digest(recipe)
@@ -119,7 +123,8 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         )
         if temporary_directory.timed_out or temporary_directory.return_code != 0:
             raise CodingWorkflowError(
-                temporary_directory.stderr.strip() or "Could not create workspace temporary directory."
+                temporary_directory.stderr.strip()
+                or "Could not create workspace temporary directory."
             )
         synced = await run_contained(
             ctx,
@@ -131,7 +136,9 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             raise CodingWorkflowError(synced.stderr.strip() or "uv sync failed")
         python = workspace_python(worktree)
         if not python.is_file():
-            raise CodingWorkflowError("uv sync did not create the worktree-owned Python interpreter.")
+            raise CodingWorkflowError(
+                "uv sync did not create the worktree-owned Python interpreter."
+            )
         probed = await run_contained(
             ctx,
             (str(python), "-c", _PROBE, str(worktree), *recipe.project_modules),
@@ -139,7 +146,9 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             timeout_seconds=recipe.timeout_seconds,
         )
         if probed.timed_out or probed.return_code != 0:
-            raise CodingWorkflowError(probed.stderr.strip() or "worktree import provenance probe failed")
+            raise CodingWorkflowError(
+                probed.stderr.strip() or "worktree import provenance probe failed"
+            )
         json.loads(probed.stdout)
         baseline_tree = await candidate_tree_sha(worktree, config=config)
         baseline_checks: dict[str, WorkProductCheck] = {}
