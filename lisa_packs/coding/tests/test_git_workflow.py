@@ -145,6 +145,25 @@ def _context(
 
 
 @pytest.mark.asyncio
+async def test_create_worktree_accepts_long_summary(tmp_path: Path) -> None:
+    catalog = build_tool_catalog(Path(__file__).resolve().parents[3])
+    repo = await git_repo(tmp_path)
+    factory = ToolContextFactory(
+        root=repo.root,
+        pack_config={"workspace_root": str(repo.root)},
+        data_dir=tmp_path / "data",
+    )
+    summary = ("Issue 1 gofmt batch: " + "format and verify changed files. " * 12).strip()
+
+    created = await run_tool(catalog, "coding_create_worktree", factory, {"summary": summary})
+
+    assert created.result.error == ""
+    artifact = await factory.artifact_store.get(created.result.output_json["artifact_id"])
+    assert artifact is not None
+    assert artifact.safe_summary == summary
+
+
+@pytest.mark.asyncio
 async def test_patch_invalidates_checks_and_status_tracks_owned_worktree(tmp_path: Path) -> None:
     """A worktree patch receives a new revision and only configured checks can run."""
 

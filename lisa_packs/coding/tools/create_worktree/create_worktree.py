@@ -5,7 +5,7 @@ from __future__ import annotations
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.workflow import CodingWorkflowError, run_git
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sdk.workproducts import WorkProduct
 
 TOOL_ID = "coding_create_worktree"
@@ -14,7 +14,7 @@ TOOL_ID = "coding_create_worktree"
 class Parameters(BaseModel):
     """Structured worktree creation request."""
 
-    summary: str = Field(default="", max_length=240)
+    summary: str = ""
 
 
 def _branch_name(prefix: str, artifact_id: str) -> str:
