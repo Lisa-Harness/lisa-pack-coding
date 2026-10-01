@@ -30,8 +30,10 @@ resources:
             argv: ["python3", "-m", "unittest"]
             timeout_seconds: 90
         required_check_ids: [test]
+      lisa-pack-core:
+        plan_max_tokens: 32768
       lisa-pack-memory:
-        memory_distill_max_tokens: 5000
+        memory_distill_max_tokens: 16384
     required:
       - lisa-pack-bash
       - lisa-pack-bwrap
