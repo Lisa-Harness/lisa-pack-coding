@@ -57,14 +57,21 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             )
 
         started = time.perf_counter()
-        candidate_tree = await candidate_tree_sha(worktree, config=config)
+        candidate_tree = await candidate_tree_sha(
+            worktree, config=config, paths=artifact.changed_paths or None
+        )
         result = await run_contained(
             ctx,
             expand_check_argv(check, worktree=worktree),
             worktree=worktree,
             timeout_seconds=check.timeout_seconds,
         )
-        if await candidate_tree_sha(worktree, config=config) != candidate_tree:
+        if (
+            await candidate_tree_sha(
+                worktree, config=config, paths=artifact.changed_paths or None
+            )
+            != candidate_tree
+        ):
             raise CodingWorkflowError(
                 "Check changed the candidate Git tree; rerun on current content."
             )

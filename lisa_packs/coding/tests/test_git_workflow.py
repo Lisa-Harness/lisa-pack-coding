@@ -186,6 +186,61 @@ async def test_patch_invalidates_checks_and_status_tracks_owned_worktree(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_commit_stages_accumulated_task_paths_only(tmp_path: Path) -> None:
+    """Check byproducts and unrelated staged files are excluded from the commit."""
+    root = await _repository(tmp_path)
+    (root / "other.txt").write_text("one\n", encoding="utf-8")
+    await _git(root, "add", "other.txt")
+    await _git(root, "commit", "-m", "add second file")
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "edit two files"}))
+    artifact_id = created.output_json["artifact_id"]
+    patches = (
+        "--- a/app.txt\n+++ b/app.txt\n@@ -1 +1 @@\n-hello\n+hello world\n",
+        "--- a/other.txt\n+++ b/other.txt\n@@ -1 +1 @@\n-one\n+two\n",
+    )
+    for patch in patches:
+        result = await apply_patch(
+            _context(root, store, {"artifact_id": artifact_id, "patch": patch})
+        )
+        assert result.error == ""
+
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    assert artifact.changed_paths == ["app.txt", "other.txt"]
+    checked = await run_check(
+        _context(root, store, {"artifact_id": artifact_id, "check_id": "unit"})
+    )
+    assert checked.output_json["status"] == "passed"
+
+    worktree = Path(created.output_json["worktree_path"])
+    (worktree / "__pycache__").mkdir()
+    (worktree / "__pycache__" / "check.pyc").write_bytes(b"byproduct")
+    (worktree / "unrelated.txt").write_text("not part of this task\n", encoding="utf-8")
+    await _git(worktree, "add", "unrelated.txt")
+    committed = await commit(
+        _context(root, store, {"artifact_id": artifact_id, "message": "Edit two files"})
+    )
+
+    assert committed.error == ""
+    names = await asyncio.create_subprocess_exec(
+        "git",
+        "diff-tree",
+        "--no-commit-id",
+        "--name-only",
+        "-r",
+        "HEAD",
+        cwd=worktree,
+        stdout=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await names.communicate()
+    assert names.returncode == 0
+    assert set(stdout.decode().splitlines()) == {"app.txt", "other.txt"}
+    assert (worktree / "__pycache__" / "check.pyc").is_file()
+    assert (worktree / "unrelated.txt").is_file()
+
+
+@pytest.mark.asyncio
 async def test_patch_accepts_unterminated_hunk_without_trailing_context(tmp_path: Path) -> None:
     """The exact shape glm-5.3 sent five times in the e2e run: leading context
     only and no final newline. git rejected it as ``corrupt patch``."""

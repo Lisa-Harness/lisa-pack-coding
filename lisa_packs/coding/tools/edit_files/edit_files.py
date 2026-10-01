@@ -167,7 +167,9 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         if applied.return_code != 0:
             raise CodingWorkflowError(applied.stderr.strip() or "git apply failed")
         artifact.revision += 1
-        artifact.changed_paths = [edit.path for edit in changed]
+        artifact.changed_paths = list(
+            dict.fromkeys([*artifact.changed_paths, *(edit.path for edit in changed)])
+        )
         artifact.checks = {}
         artifact.status = "patched"
         await ctx.code_change_artifact_store.save(artifact)

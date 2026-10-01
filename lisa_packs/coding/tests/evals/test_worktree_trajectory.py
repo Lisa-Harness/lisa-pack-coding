@@ -957,7 +957,7 @@ async def test_required_check_rejects_changed_candidate_tree(
     )
     assert checked.result.output_json["status"] == "passed"
 
-    (worktree / "untracked.txt").write_text("unchecked content\n", encoding="utf-8")
+    (worktree / "app.txt").write_text("changed after check\n", encoding="utf-8")
     committed = await run_tool(
         catalog,
         "coding_commit",
@@ -1134,7 +1134,9 @@ async def test_check_rejects_worktree_mutation_during_sandbox_run(
     assert original_dispatch is not None
 
     async def mutating_dispatch(tool_id: str, parameters: Mapping[str, object]) -> ToolResult:
-        (Path(str(parameters["cwd"])) / "generated.txt").write_text("new\n", encoding="utf-8")
+        (Path(str(parameters["cwd"])) / "app.txt").write_text(
+            "changed during check\n", encoding="utf-8"
+        )
         return await original_dispatch(tool_id, parameters)
 
     factory.delegated_tool_dispatch = mutating_dispatch

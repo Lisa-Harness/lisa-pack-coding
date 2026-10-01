@@ -12,7 +12,6 @@ from lisa_packs.coding.workflow import (
     artifact_has_current_required_checks,
     artifact_worktree,
     candidate_tree_sha,
-    changed_paths,
     load_owned_artifact,
     preparation_is_current,
     run_git,
@@ -57,7 +56,10 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             raise CodingWorkflowError(
                 "Workspace preparation is missing or stale; run coding_prepare_workspace first."
             )
-        candidate_tree = await candidate_tree_sha(worktree, config=config)
+        paths = list(dict.fromkeys(artifact.changed_paths))
+        if not paths:
+            raise CodingWorkflowError("Artifact has no task-owned changed paths to commit.")
+        candidate_tree = await candidate_tree_sha(worktree, config=config, paths=paths)
         if not artifact_has_current_required_checks(artifact, candidate_tree=candidate_tree):
             raise CodingWorkflowError(
                 "Every required check must pass at the current artifact revision and checked tree."
@@ -65,10 +67,12 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         current_branch = await run_git(worktree, ("branch", "--show-current"), config=config)
         if current_branch.return_code != 0 or current_branch.stdout.strip() != artifact.branch:
             raise CodingWorkflowError("Owned worktree is not on the recorded feature branch.")
-        paths = await changed_paths(worktree, config=config)
-        if not paths:
-            raise CodingWorkflowError("Owned worktree has no changes to commit.")
-        staged = await run_git(worktree, ("add", "--", *paths), config=config)
+        reset = await run_git(worktree, ("reset", "--mixed", "HEAD"), config=config)
+        if reset.return_code != 0:
+            raise CodingWorkflowError(reset.stderr.strip() or "git index reset failed")
+        staged = await run_git(
+            worktree, ("--literal-pathspecs", "add", "--", *paths), config=config
+        )
         if staged.return_code != 0:
             raise CodingWorkflowError(staged.stderr.strip() or "git add failed")
         committed = await run_git(worktree, ("commit", "-m", params.message), config=config)

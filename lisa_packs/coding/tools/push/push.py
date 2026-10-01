@@ -40,8 +40,12 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         if not artifact_branch_is_allowed(artifact, config):
             raise CodingWorkflowError("Artifact branch is not an owned unprotected feature branch.")
         worktree = artifact_worktree(artifact, config=config)
+        paths = list(dict.fromkeys(artifact.changed_paths))
+        if not paths:
+            raise CodingWorkflowError("Artifact has no task-owned changed paths to verify.")
         if not artifact_has_current_required_checks(
-            artifact, candidate_tree=await candidate_tree_sha(worktree, config=config)
+            artifact,
+            candidate_tree=await candidate_tree_sha(worktree, config=config, paths=paths),
         ):
             raise CodingWorkflowError(
                 "Every required check must pass at the current artifact revision and checked tree."

@@ -288,11 +288,26 @@ async def run_git(
     )
 
 
-async def candidate_tree_sha(worktree: Path, *, config: CodingPackConfig) -> str:
-    """Hash tracked and untracked commit candidates without changing the live index."""
+async def candidate_tree_sha(
+    worktree: Path,
+    *,
+    config: CodingPackConfig,
+    paths: Sequence[str] | None = None,
+) -> str:
+    """Hash commit candidates without changing the live index.
+
+    When ``paths`` is provided, only those task-owned paths enter the tree;
+    check byproducts and unrelated worktree edits cannot certify or alter a
+    coding artifact's commit.
+    """
     with tempfile.TemporaryDirectory(prefix="lisa-candidate-index-") as temp_dir:
         env = {**os.environ, "GIT_INDEX_FILE": str(Path(temp_dir) / "index")}
-        for args in (("read-tree", "HEAD"), ("add", "-A", "--", "."), ("write-tree",)):
+        add_paths = list(paths) if paths else ["."]
+        for args in (
+            ("read-tree", "HEAD"),
+            ("--literal-pathspecs", "add", "-A", "--", *add_paths),
+            ("write-tree",),
+        ):
             result = await run_git(worktree, args, config=config, env=env)
             if result.return_code != 0:
                 raise CodingWorkflowError(
