@@ -186,6 +186,80 @@ async def test_patch_invalidates_checks_and_status_tracks_owned_worktree(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_patch_accepts_unterminated_hunk_without_trailing_context(tmp_path: Path) -> None:
+    """The exact shape glm-5.3 sent five times in the e2e run: leading context
+    only and no final newline. git rejected it as ``corrupt patch``."""
+
+    root = await _repository(tmp_path)
+    (root / "stats.py").write_text(
+        "def mean(values):\n"
+        "    if not values:\n"
+        "        raise ValueError('empty')\n"
+        "    return sum(values) / (len(values) - 1)\n"
+        "\n"
+        "\n"
+        "def spread(values):\n"
+        "    return max(values) - min(values)\n",
+        encoding="utf-8",
+    )
+    await _git(root, "add", "stats.py")
+    await _git(root, "commit", "-m", "stats")
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "fix mean"}))
+    artifact_id = created.output_json["artifact_id"]
+    patch = (
+        "--- a/stats.py\n+++ b/stats.py\n@@ -2,3 +2,3 @@\n"
+        "     if not values:\n"
+        "         raise ValueError('empty')\n"
+        "-    return sum(values) / (len(values) - 1)\n"
+        "+    return sum(values) / len(values)"
+    )
+
+    patched = await apply_patch(_context(root, store, {"artifact_id": artifact_id, "patch": patch}))
+
+    assert patched.error == ""
+    worktree = Path(created.output_json["worktree_path"])
+    assert "return sum(values) / len(values)\n\n" in (worktree / "stats.py").read_text()
+
+
+@pytest.mark.asyncio
+async def test_patch_rejects_context_free_hunks_in_multi_hunk_file(tmp_path: Path) -> None:
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "two hunks"}))
+    patch = (
+        "--- a/app.txt\n+++ b/app.txt\n"
+        "@@ -1,1 +1,1 @@\n-hello\n+hi\n"
+        "@@ -3,1 +3,1 @@\n-x\n+y\n"
+    )
+
+    patched = await apply_patch(
+        _context(root, store, {"artifact_id": created.output_json["artifact_id"], "patch": patch})
+    )
+
+    assert "carry no context lines" in patched.error
+
+
+@pytest.mark.asyncio
+async def test_configured_check_ids_are_discoverable(tmp_path: Path) -> None:
+    """The e2e executor guessed 'tests' and 'unittest' before finding 'test'."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "checks"}))
+    artifact_id = created.output_json["artifact_id"]
+
+    inspected = await status(_context(root, store, {"artifact_id": artifact_id}))
+    unknown = await run_check(
+        _context(root, store, {"artifact_id": artifact_id, "check_id": "tests"})
+    )
+
+    assert inspected.output_json["configured_check_ids"] == ["unit"]
+    assert inspected.output_json["required_check_ids"] == ["unit"]
+    assert "Configured checks: 'unit'." in unknown.error
+
+
+@pytest.mark.asyncio
 async def test_configured_preparation_blocks_checks_until_current(tmp_path: Path) -> None:
     """Preparation is enforced only when the session config opts into recipes."""
 
