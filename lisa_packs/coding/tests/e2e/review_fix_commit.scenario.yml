@@ -1,0 +1,49 @@
+# Knowledge-capturing review, then a validated, committed fix.
+# Run: uv run lisa-e2e run <this file>   (from the lisa framework checkout)
+id: coding/review-fix-commit
+session_context: session_context.md
+fixture:
+  repo: fixtures/stats
+packs:
+  - lisa-pack-bash
+  - lisa-pack-bwrap
+  - lisa-pack-coding
+  - lisa-pack-markdown
+  - lisa-pack-personas
+  - lisa-pack-search
+  - lisa-pack-serper
+turns:
+  - >-
+    Review the Python project in the coding workspace for defects. Record what
+    you learn about the codebase, including any defects you find, in memory so
+    it is available in later sessions.
+  - >-
+    Fix the most serious defect from your review: make the change in an
+    isolated worktree, run the required checks, and commit it.
+approvals:
+  approve: ["*"]
+  deny: [coding_push, coding_cleanup_worktree]
+budgets:
+  max_messages: 16
+  max_continues: 0
+  max_yield_replies: 0
+  wall_clock_s: 1800
+oracles:
+  hygiene:
+    - not_aborted: {}
+    - no_turn_errors: {}
+    - no_operator_exit: {}
+    - no_unanswered_yield: {}
+    - no_runtime_errors: {}
+  review:
+    - receipt: {capability: [coding_read_file, coding_search_code, coding_outline_source]}
+    - memory_recorded: {mentions_any: ["mean", "stats.py"]}
+  fix:
+    - baseline_fails: {argv: [python3, -m, unittest]}
+    - workproduct_committed: {}
+    - branch_prefix: {prefix: "lisa/"}
+    - main_untouched: {}
+    - diff_touches: {paths: [stats.py], exact: true}
+    - checks_current: {}
+    - worktree_clean: {}
+    - independent_check: {argv: [python3, -m, unittest]}
