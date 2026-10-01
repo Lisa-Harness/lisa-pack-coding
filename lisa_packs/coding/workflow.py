@@ -152,7 +152,12 @@ async def run_contained(
         or floor.execution != "sandbox"
         or floor.persistence != "direct-write"
     ):
-        raise CodingWorkflowError("bwrap sandbox has no direct-write execution floor.")
+        raise CodingWorkflowError(
+            "bwrap sandbox has no direct-write execution floor (found "
+            f"execution={getattr(floor, 'execution', None)!r}, "
+            f"persistence={getattr(floor, 'persistence', None)!r}). Set "
+            "lisa-pack-bwrap sandbox.floor to execution: sandbox, persistence: direct-write."
+        )
     matching_paths = (
         (root, access)
         for path, access in floor.paths.items()

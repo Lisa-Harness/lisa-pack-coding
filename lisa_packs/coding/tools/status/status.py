@@ -63,6 +63,8 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             "git_diff_stat": diff_stat.stdout.strip() or "(no diff)",
             "git_diff": diff.stdout,
             "git_diff_truncated": diff.output_truncated,
+            "configured_check_ids": [check.id for check in config.checks],
+            "required_check_ids": list(artifact.required_check_ids),
             "checks": {
                 check_id: {
                     "status": record.status,

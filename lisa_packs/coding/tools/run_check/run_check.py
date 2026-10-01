@@ -41,7 +41,10 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         config = get_coding_config(ctx)
         check = next((item for item in config.checks if item.id == params.check_id), None)
         if check is None:
-            raise CodingWorkflowError(f"Unknown configured check '{params.check_id}'.")
+            configured = ", ".join(f"'{item.id}'" for item in config.checks) or "none"
+            raise CodingWorkflowError(
+                f"Unknown configured check '{params.check_id}'. Configured checks: {configured}."
+            )
         artifact = await load_owned_artifact(
             ctx,
             artifact_id=params.artifact_id,
