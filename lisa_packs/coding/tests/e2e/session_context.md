@@ -40,8 +40,6 @@ resources:
       - lisa-pack-coding
       - lisa-pack-markdown
       - lisa-pack-personas
-      - lisa-pack-search
-      - lisa-pack-serper
 providers:
   capabilities:
     memory: lisa-pack-memory

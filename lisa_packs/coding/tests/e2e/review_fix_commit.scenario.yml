@@ -10,8 +10,6 @@ packs:
   - lisa-pack-coding
   - lisa-pack-markdown
   - lisa-pack-personas
-  - lisa-pack-search
-  - lisa-pack-serper
 turns:
   - >-
     Review the Python project in the coding workspace for defects. Record what
