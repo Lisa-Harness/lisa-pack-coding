@@ -34,6 +34,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             ctx,
             artifact_id=params.artifact_id,
             config=config,
+            claim=True,
         )
         if not artifact.commit_sha:
             raise CodingWorkflowError("Artifact has no committed revision to push.")

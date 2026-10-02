@@ -100,6 +100,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             ctx,
             artifact_id=params.artifact_id,
             config=config,
+            claim=True,
         )
         worktree = artifact_worktree(artifact, config=config)
         checked = await run_git(

@@ -10,7 +10,7 @@ import asyncio
 import hashlib
 import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import pytest
@@ -91,11 +91,14 @@ def _context(
     required_check_ids: list[str] | None = None,
     preparation_recipes: list[dict[str, object]] | None = None,
     sandbox_result: ToolResult | None = None,
+    sandbox_effect: Callable[[Path], None] | None = None,
     task_id: str = "",
 ) -> ToolExecutionContext:
     async def dispatch(tool_id: str, parameters: Mapping[str, object]) -> ToolResult:
         assert tool_id == "bwrap_run"
         worktree = str(parameters["cwd"])
+        if sandbox_effect is not None:
+            sandbox_effect(Path(worktree))
         response = sandbox_result or ToolResult(
             output_text="checked", output_json={"return_code": 0}
         )
@@ -331,6 +334,176 @@ async def test_configured_check_ids_are_discoverable(tmp_path: Path) -> None:
     assert inspected.output_json["configured_check_ids"] == ["unit"]
     assert inspected.output_json["required_check_ids"] == ["unit"]
     assert "Configured checks: 'unit'." in unknown.error
+
+
+_FORMAT_FIX = {"id": "format", "argv": ["gofmt", "-w", "."], "kind": "fix"}
+_UNIT = {"id": "unit", "argv": [sys.executable, "-c", "print('checked')"]}
+
+
+def _reformat(worktree: Path) -> None:
+    for name in ("app.txt", "other.txt"):
+        path = worktree / name
+        path.write_text(path.read_text(encoding="utf-8").upper(), encoding="utf-8")
+    (worktree / "__pycache__").mkdir(exist_ok=True)
+    (worktree / "__pycache__" / "fmt.cache").write_text("byproduct\n", encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_fix_check_edits_become_a_new_revision_and_are_committed(tmp_path: Path) -> None:
+    root = await _repository(tmp_path)
+    (root / "other.txt").write_text("untouched by the task\n", encoding="utf-8")
+    await _git(root, "add", "other.txt")
+    await _git(root, "commit", "-m", "add second file")
+    store = MemoryWorkProductStore()
+    checks = [_FORMAT_FIX, _UNIT]
+    created = await create_worktree(_context(root, store, {"summary": "fmt"}, checks=checks))
+    artifact_id = created.output_json["artifact_id"]
+    patch = "--- a/app.txt\n+++ b/app.txt\n@@ -1 +1 @@\n-hello\n+hello world\n"
+    patched = await apply_patch(
+        _context(root, store, {"artifact_id": artifact_id, "patch": patch}, checks=checks)
+    )
+    assert patched.error == ""
+    unit = await run_check(
+        _context(root, store, {"artifact_id": artifact_id, "check_id": "unit"}, checks=checks)
+    )
+    assert unit.error == ""
+
+    fixed = await run_check(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "check_id": "format"},
+            checks=checks,
+            sandbox_effect=_reformat,
+        )
+    )
+
+    assert fixed.error == ""
+    assert fixed.output_json["fixed_paths"] == ["app.txt", "other.txt"]
+    assert fixed.output_json["revision"] == 2
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    assert artifact.changed_paths == ["app.txt", "other.txt"]
+    assert set(artifact.checks) == {"format"}
+    assert artifact.checks["format"].revision == 2
+
+    rerun = await run_check(
+        _context(root, store, {"artifact_id": artifact_id, "check_id": "unit"}, checks=checks)
+    )
+    assert rerun.error == ""
+    committed = await commit(
+        _context(
+            root, store, {"artifact_id": artifact_id, "message": "Format"}, checks=checks
+        )
+    )
+    assert committed.error == ""
+    worktree = Path(created.output_json["worktree_path"])
+    process = await asyncio.create_subprocess_exec(
+        "git", "show", "--name-only", "--format=", "HEAD", cwd=worktree,
+        stdout=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await process.communicate()
+    assert stdout.decode().split() == ["app.txt", "other.txt"]
+
+
+@pytest.mark.asyncio
+async def test_verify_check_edits_are_reverted_and_fail(tmp_path: Path) -> None:
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "verify"}))
+    artifact_id = created.output_json["artifact_id"]
+    worktree = Path(created.output_json["worktree_path"])
+
+    checked = await run_check(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "check_id": "unit"},
+            sandbox_effect=lambda path: (path / "app.txt").write_text("rewritten\n"),
+        )
+    )
+
+    assert "modified app.txt; the edits were reverted" in checked.error
+    assert (worktree / "app.txt").read_text(encoding="utf-8") == "hello\n"
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    assert artifact.revision == 0
+    assert artifact.checks == {}
+
+
+@pytest.mark.asyncio
+async def test_failed_fix_check_reverts_its_edits(tmp_path: Path) -> None:
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    checks = [_FORMAT_FIX, _UNIT]
+    created = await create_worktree(_context(root, store, {"summary": "fmt"}, checks=checks))
+    artifact_id = created.output_json["artifact_id"]
+    worktree = Path(created.output_json["worktree_path"])
+
+    fixed = await run_check(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "check_id": "format"},
+            checks=checks,
+            sandbox_result=ToolResult(output_text="", output_json={"return_code": 2}),
+            sandbox_effect=lambda path: (path / "app.txt").write_text("half-written\n"),
+        )
+    )
+
+    assert fixed.error == ""
+    assert fixed.output_json["status"] == "failed"
+    assert fixed.output_json["fixed_paths"] == []
+    assert (worktree / "app.txt").read_text(encoding="utf-8") == "hello\n"
+
+
+@pytest.mark.asyncio
+async def test_commit_accepts_long_multiline_message(tmp_path: Path) -> None:
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "message"}))
+    artifact_id = created.output_json["artifact_id"]
+    patch = "--- a/app.txt\n+++ b/app.txt\n@@ -1 +1 @@\n-hello\n+hello world\n"
+    await apply_patch(_context(root, store, {"artifact_id": artifact_id, "patch": patch}))
+    await run_check(_context(root, store, {"artifact_id": artifact_id, "check_id": "unit"}))
+    message = "Change greeting\n\n" + "Explain the change in detail. " * 40
+
+    committed = await commit(
+        _context(root, store, {"artifact_id": artifact_id, "message": message})
+    )
+
+    assert committed.error == ""
+    worktree = Path(created.output_json["worktree_path"])
+    process = await asyncio.create_subprocess_exec(
+        "git", "log", "-1", "--format=%B", cwd=worktree, stdout=asyncio.subprocess.PIPE
+    )
+    stdout, _ = await process.communicate()
+    assert stdout.decode().strip() == message.strip()
+
+
+@pytest.mark.asyncio
+async def test_advancing_tools_claim_the_artifact_for_the_current_task(tmp_path: Path) -> None:
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(
+        _context(root, store, {"summary": "claim"}, task_id="task-one")
+    )
+    artifact_id = created.output_json["artifact_id"]
+
+    await status(_context(root, store, {"artifact_id": artifact_id}, task_id="task-two"))
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    assert artifact.task_id == "task-one"
+
+    checked = await run_check(
+        _context(
+            root, store, {"artifact_id": artifact_id, "check_id": "unit"}, task_id="task-two"
+        )
+    )
+    assert checked.error == ""
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    assert artifact.task_id == "task-two"
 
 
 @pytest.mark.asyncio

@@ -36,8 +36,8 @@ owned worktree, never the source checkout.
 | `coding_edit_files` | write | ✓ | Apply exact, hash-guarded replacements, creates, or deletes as one revision. The tool generates and prevalidates the Git patch. |
 | `coding_apply_patch` | write | ✓ | Prevalidate (`git apply --check`) and apply a bounded unified diff. Bumps `revision`, records `changed_paths`, **clears `checks`** (stale results are invalidated). |
 | `coding_prepare_workspace` | write | ✓ | Run a configured locked Python/uv preparation recipe in the owned sandbox and record preparation evidence. |
-| `coding_run_check` | write | ✓ | Run one named check through the bwrap owner's direct-write sandbox floor. Result records the current revision and candidate-tree hash; no host fallback. |
-| `coding_commit` | write | ✓ | Stage commit candidates and commit only after required checks passed for this revision and tree, on the owned unprotected branch. No newline in the message. |
+| `coding_run_check` | write | ✓ | Run one named check through the bwrap owner's direct-write sandbox floor. Result records the current revision and candidate-tree hash; no host fallback. A `verify` check that rewrites files fails and its edits are reverted; a `fix` check's edits become a new revision (like a patch) and stale the other checks. |
+| `coding_commit` | write | ✓ | Stage commit candidates and commit only after required checks passed for this revision and tree, on the owned unprotected branch. The message may be any length and span multiple lines. |
 | `coding_push` | external_write | ✓ | Push the checked feature branch upstream (`push_remote`). **No force option exists.** |
 | `coding_cleanup_worktree` | write | ✓ | Remove a **clean** owned worktree (`git worktree remove`, no force). |
 | `coding_status` | read | — | Report git status/diff + check state for an artifact without mutating it. |
@@ -87,7 +87,11 @@ create_worktree ─▶ edit_files ─▶ run_check ─▶ commit ─▶ push ─
 
 Every artifact is a **`WorkProduct`** (`sdk.workproducts`) carrying a six-field
 host identity — `workspace_id`, `user_id`, `user_slug`, `surface_type`,
-`surface_id`, `session_plan_digest`, plus the creation `task_id`. Load-time
+`surface_id`, `session_plan_digest`, plus the `task_id` of the task currently
+responsible for it. Every tool that advances an artifact (edit, patch, prepare,
+check, commit, push — never a read) claims it for the calling task via
+`WorkProduct.claim_for_task`, so a worktree started under one task and finished
+under a later one counts toward the later task's completion. Load-time
 ownership is checked via the shared canonical rule
 [`artifact.belongs_to(ctx)`](lisa_packs/coding/workflow.py)
 (`artifact_owner_matches`), so an artifact from
@@ -144,7 +148,8 @@ cannot forge it.** A `model_validator` enforces unique check ids, resolvable
 
 Key keys (with defaults): `workspace_root` (**required**, must be a Git
 worktree — resolved via the shared `sdk.workspace.resolve_workspace_root`,
-strict `require_git=True`), `checks` (tuple of `{id, argv, timeout_seconds}`),
+strict `require_git=True`), `checks` (tuple of `{id, argv, timeout_seconds, kind}`,
+where `kind` is `verify` (default) or `fix`),
 `required_check_ids`, `branch_prefix` (`lisa/`), `protected_branches`
 (`main`,`master`), `push_remote` (`origin`), and the byte/line/result bounds
 (`max_file_bytes` 512 000, `max_read_lines` 400, `max_patch_bytes` 200 000,
@@ -215,6 +220,9 @@ resources:
         protected_branches: [main, master]
         push_remote: origin
         checks:
+          - id: format
+            argv: ["/home/you/Code/lisa/.venv/bin/python", "-m", "ruff", "format", "."]
+            kind: fix  # rewrites files; its edits become a new revision
           - id: unit
             argv: ["/home/you/Code/lisa/.venv/bin/python", "-m", "pytest", "-q"]
             timeout_seconds: 300

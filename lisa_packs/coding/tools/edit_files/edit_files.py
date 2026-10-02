@@ -113,7 +113,9 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     params = Parameters.model_validate(ctx.parameters)
     try:
         config = get_coding_config(ctx)
-        artifact = await load_owned_artifact(ctx, artifact_id=params.artifact_id, config=config)
+        artifact = await load_owned_artifact(
+            ctx, artifact_id=params.artifact_id, config=config, claim=True
+        )
         worktree = artifact_worktree(artifact, config=config)
         if len({edit.path for edit in params.edits}) != len(params.edits):
             raise CodingWorkflowError("Each structured edit path must be unique.")

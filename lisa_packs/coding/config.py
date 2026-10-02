@@ -24,6 +24,9 @@ class CodingCheck(BaseModel):
     id: str = Field(min_length=1, max_length=80)
     argv: tuple[str, ...] = Field(min_length=1)
     timeout_seconds: int = Field(default=300, ge=1, le=1800)
+    #: ``verify`` must leave files untouched; ``fix`` (formatters, autofixers)
+    #: may rewrite them and its edits become a new artifact revision.
+    kind: Literal["verify", "fix"] = "verify"
 
 
 class CodingPreparationRecipe(BaseModel):

@@ -33,12 +33,15 @@ __all__ = [
     "preparation_is_current",
     "preparation_recipe_digest",
     "readable_root",
+    "restore_tree_paths",
     "run_contained",
     "run_git",
     "run_process",
     "dependency_manifest_digest",
     "expand_check_argv",
+    "tree_changes",
     "workspace_python",
+    "worktree_tree_sha",
 ]
 
 _GIT_STATUS_PATH_OFFSET = 3
@@ -300,20 +303,75 @@ async def candidate_tree_sha(
     check byproducts and unrelated worktree edits cannot certify or alter a
     coding artifact's commit.
     """
+    add_paths = list(paths) if paths else ["."]
+    return await _hash_tree(
+        worktree, config=config, adds=(("--literal-pathspecs", "add", "-A", "--", *add_paths),)
+    )
+
+
+async def worktree_tree_sha(
+    worktree: Path, *, config: CodingPackConfig, paths: Sequence[str]
+) -> str:
+    """Hash every tracked file plus ``paths``, ignoring untracked byproducts.
+
+    Comparing this before and after a check reveals which real files the check
+    rewrote, while caches and build output it leaves behind stay invisible.
+    """
+    adds: list[tuple[str, ...]] = [("add", "-u")]
+    if paths:
+        adds.append(("--literal-pathspecs", "add", "-A", "--", *paths))
+    return await _hash_tree(worktree, config=config, adds=adds)
+
+
+async def _hash_tree(
+    worktree: Path, *, config: CodingPackConfig, adds: Sequence[tuple[str, ...]]
+) -> str:
     with tempfile.TemporaryDirectory(prefix="lisa-candidate-index-") as temp_dir:
         env = {**os.environ, "GIT_INDEX_FILE": str(Path(temp_dir) / "index")}
-        add_paths = list(paths) if paths else ["."]
-        for args in (
-            ("read-tree", "HEAD"),
-            ("--literal-pathspecs", "add", "-A", "--", *add_paths),
-            ("write-tree",),
-        ):
+        for args in (("read-tree", "HEAD"), *adds, ("write-tree",)):
             result = await run_git(worktree, args, config=config, env=env)
             if result.return_code != 0:
                 raise CodingWorkflowError(
                     result.stderr.strip() or "Cannot hash candidate Git tree."
                 )
         return result.stdout.strip()
+
+
+async def tree_changes(
+    worktree: Path, *, config: CodingPackConfig, before: str, after: str
+) -> list[tuple[str, str]]:
+    """Return ``(status, path)`` for each file that differs between two trees."""
+
+    if before == after:
+        return []
+    result = await run_git(
+        worktree,
+        ("diff-tree", "-r", "--no-renames", "--name-status", "-z", before, after),
+        config=config,
+    )
+    if result.return_code != 0:
+        raise CodingWorkflowError(result.stderr.strip() or "Cannot diff candidate Git trees.")
+    fields = result.stdout.split("\0")
+    return list(zip(fields[0::2], fields[1::2], strict=False))
+
+
+async def restore_tree_paths(
+    worktree: Path, *, config: CodingPackConfig, tree: str, changes: Sequence[tuple[str, str]]
+) -> None:
+    """Put each changed path back to its content in ``tree``."""
+
+    existing = [path for status, path in changes if status != "A"]
+    if existing:
+        restored = await run_git(
+            worktree,
+            ("--literal-pathspecs", "restore", f"--source={tree}", "--worktree", "--", *existing),
+            config=config,
+        )
+        if restored.return_code != 0:
+            raise CodingWorkflowError(restored.stderr.strip() or "Cannot restore changed files.")
+    for status, path in changes:
+        if status == "A":
+            (worktree / path).unlink(missing_ok=True)
 
 
 def artifact_owner_matches(artifact: WorkProduct, ctx: ToolExecutionContext) -> bool:
@@ -352,8 +410,13 @@ async def load_owned_artifact(
     artifact_id: str,
     config: CodingPackConfig,
     require_worktree: bool = True,
+    claim: bool = False,
 ) -> WorkProduct:
-    """Load an artifact only when the host and workspace ownership match."""
+    """Load an artifact only when the host and workspace ownership match.
+
+    ``claim`` hands the artifact to the calling task (persisted by the caller's
+    save); tools that advance the artifact claim it, reads never do.
+    """
 
     store = ctx.code_change_artifact_store
     if store is None:
@@ -366,6 +429,8 @@ async def load_owned_artifact(
         raise CodingWorkflowError("Artifact does not belong to this workspace, user, or session.")
     if require_worktree:
         artifact_worktree(artifact, config=config)
+    if claim:
+        artifact.claim_for_task(ctx)
     return artifact
 
 

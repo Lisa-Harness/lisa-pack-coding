@@ -1143,7 +1143,10 @@ async def test_check_rejects_worktree_mutation_during_sandbox_run(
     checked = await run_tool(
         catalog, "coding_run_check", factory, {"artifact_id": artifact_id, "check_id": "smoke"}
     )
-    assert "changed the candidate git tree" in checked.result.error.lower()
+    assert "modified app.txt; the edits were reverted" in checked.result.error
+    assert (repo.root.parent / ".lisa-worktrees" / artifact_id / "app.txt").read_text(
+        encoding="utf-8"
+    ) != "changed during check\n"
     artifact = await factory.artifact_store.get(artifact_id)
     assert artifact is not None and artifact.checks == {}
 

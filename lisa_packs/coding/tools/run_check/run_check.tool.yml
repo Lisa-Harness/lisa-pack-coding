@@ -1,6 +1,6 @@
 tool_id: coding_run_check
 pack_id: lisa-pack-coding
-description: "Run one named finite check configured for the owned coding worktree. coding_status lists the configured_check_ids and required_check_ids."
+description: "Run one named finite check configured for the owned coding worktree. coding_status lists the configured_check_ids, fix_check_ids, and required_check_ids. A fix check (formatter) keeps its edits as a new revision; rerun the other checks afterward."
 exportable: true
 effect: write
 approval_required: true

@@ -102,7 +102,9 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     try:
         config = get_coding_config(ctx)
         recipe = config.preparation_recipe(params.recipe_id)
-        artifact = await load_owned_artifact(ctx, artifact_id=params.artifact_id, config=config)
+        artifact = await load_owned_artifact(
+            ctx, artifact_id=params.artifact_id, config=config, claim=True
+        )
         worktree = artifact_worktree(artifact, config=config)
         if not _is_uv_project(worktree):
             raise CodingWorkflowError(

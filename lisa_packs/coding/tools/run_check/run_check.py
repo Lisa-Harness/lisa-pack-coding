@@ -2,15 +2,22 @@
 
 The check argv runs through ``bwrap_run`` in the owned worktree. If the sandbox
 is unavailable or degrades, the check fails without running on the host.
+
+A ``verify`` check must not rewrite files: any edits it makes are reverted and
+the run fails. A ``fix`` check (formatter, autofixer) may rewrite files; when it
+succeeds its edits join the task's changed paths as a new revision, exactly as
+if they had been applied by ``coding_apply_patch``, and other checks go stale.
 """
 
 from __future__ import annotations
 
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import get_coding_config
+from lisa_packs.coding.local_files import CodingPathError, resolve_relative_path_at_root
 from lisa_packs.coding.workflow import (
     CodingWorkflowError,
     artifact_worktree,
@@ -18,7 +25,10 @@ from lisa_packs.coding.workflow import (
     expand_check_argv,
     load_owned_artifact,
     preparation_is_current,
+    restore_tree_paths,
     run_contained,
+    tree_changes,
+    worktree_tree_sha,
 )
 from pydantic import BaseModel, Field
 from sdk.workproducts import WorkProductCheck, WorkProductCheckStatus
@@ -31,6 +41,16 @@ class Parameters(BaseModel):
 
     artifact_id: str = Field(min_length=1, max_length=100)
     check_id: str = Field(min_length=1, max_length=80)
+
+
+def _editable(worktree: Path, paths: list[str]) -> bool:
+    """A fixer may only touch paths the edit tools could also touch."""
+    try:
+        for path in paths:
+            resolve_relative_path_at_root(worktree, path)
+    except CodingPathError:
+        return False
+    return True
 
 
 async def execute(ctx: ToolExecutionContext) -> ToolResult:
@@ -49,6 +69,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             ctx,
             artifact_id=params.artifact_id,
             config=config,
+            claim=True,
         )
         worktree = artifact_worktree(artifact, config=config)
         if not preparation_is_current(artifact, worktree=worktree, config=config):
@@ -57,25 +78,40 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             )
 
         started = time.perf_counter()
-        candidate_tree = await candidate_tree_sha(
-            worktree, config=config, paths=artifact.changed_paths or None
-        )
+        before = await worktree_tree_sha(worktree, config=config, paths=artifact.changed_paths)
         result = await run_contained(
             ctx,
             expand_check_argv(check, worktree=worktree),
             worktree=worktree,
             timeout_seconds=check.timeout_seconds,
         )
-        if (
-            await candidate_tree_sha(
-                worktree, config=config, paths=artifact.changed_paths or None
-            )
-            != candidate_tree
-        ):
-            raise CodingWorkflowError(
-                "Check changed the candidate Git tree; rerun on current content."
-            )
+        after = await worktree_tree_sha(worktree, config=config, paths=artifact.changed_paths)
+        changes = await tree_changes(worktree, config=config, before=before, after=after)
         elapsed = time.perf_counter() - started
+        succeeded = not result.timed_out and result.return_code == 0
+        changed = [path for _, path in changes]
+        keep = check.kind == "fix" and succeeded and _editable(worktree, changed)
+        if changes and not keep:
+            await restore_tree_paths(worktree, config=config, tree=before, changes=changes)
+            if check.kind == "verify":
+                raise CodingWorkflowError(
+                    f"Check '{check.id}' modified {', '.join(changed)}; the edits were "
+                    "reverted. A check that rewrites files must be configured with kind: fix."
+                )
+            if succeeded:
+                raise CodingWorkflowError(
+                    f"Fix '{check.id}' modified excluded paths ({', '.join(changed)}); "
+                    "the edits were reverted."
+                )
+        fixed_paths = changed if keep else []
+        if fixed_paths:
+            artifact.revision += 1
+            artifact.changed_paths = list(dict.fromkeys([*artifact.changed_paths, *fixed_paths]))
+            artifact.checks = {}
+            artifact.status = "patched"
+        candidate_tree = await candidate_tree_sha(
+            worktree, config=config, paths=artifact.changed_paths or None
+        )
         status: WorkProductCheckStatus = (
             "timed_out" if result.timed_out else "passed" if result.return_code == 0 else "failed"
         )
@@ -97,11 +133,20 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
 
     return ToolResult(
         tool_id=TOOL_ID,
-        output_text=f"Check '{check.id}' {status} in {elapsed:.1f}s.",
+        output_text=f"Check '{check.id}' {status} in {elapsed:.1f}s."
+        + (
+            f" Fixed {', '.join(fixed_paths)} at revision {artifact.revision};"
+            " rerun the other checks."
+            if fixed_paths
+            else ""
+        ),
         output_json={
             "artifact_id": artifact.artifact_id,
             "check_id": check.id,
+            "kind": check.kind,
             "status": status,
+            "revision": artifact.revision,
+            "fixed_paths": fixed_paths,
             "return_code": result.return_code,
             "elapsed_seconds": round(elapsed, 3),
             "timed_out": result.timed_out,

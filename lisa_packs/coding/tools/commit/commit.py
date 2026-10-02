@@ -25,7 +25,7 @@ class Parameters(BaseModel):
     """Structured commit request."""
 
     artifact_id: str = Field(min_length=1, max_length=100)
-    message: str = Field(min_length=1, max_length=240)
+    message: str = Field(min_length=1)
 
 
 async def _verify_committed_tree(
@@ -41,13 +41,12 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
 
     params = Parameters.model_validate(ctx.parameters)
     try:
-        if "\n" in params.message or "\r" in params.message:
-            raise CodingWorkflowError("Commit messages must be a single line.")
         config = get_coding_config(ctx)
         artifact = await load_owned_artifact(
             ctx,
             artifact_id=params.artifact_id,
             config=config,
+            claim=True,
         )
         if not artifact_branch_is_allowed(artifact, config):
             raise CodingWorkflowError("Artifact branch is not an owned unprotected feature branch.")
