@@ -31,6 +31,7 @@ from lisa_packs.coding.tools.create_worktree.create_worktree import (
     execute as create_worktree,
 )
 from lisa_packs.coding.tools.edit_files.edit_files import execute as edit_files
+from lisa_packs.coding.tools.export_patches.export_patches import execute as export_patches
 from lisa_packs.coding.tools.find_files.find_files import execute as find_files
 from lisa_packs.coding.tools.list_directory.list_directory import (
     execute as list_directory,
@@ -260,6 +261,76 @@ async def test_commit_stages_accumulated_task_paths_only(tmp_path: Path) -> None
     assert set(stdout.decode().splitlines()) == {"app.txt", "other.txt"}
     assert (worktree / "__pycache__" / "check.pyc").is_file()
     assert (worktree / "unrelated.txt").is_file()
+
+
+@pytest.mark.asyncio
+async def test_export_patches_series_applies_with_git_am_after_cleanup(tmp_path: Path) -> None:
+    """An exported series round-trips into an independent clone via ``git am``."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "greeting"}))
+    artifact_id = created.output_json["artifact_id"]
+
+    early = await export_patches(_context(root, store, {"artifact_id": artifact_id}))
+    assert "no committed revision" in early.error
+
+    patch = "--- a/app.txt\n+++ b/app.txt\n@@ -1 +1 @@\n-hello\n+hello world\n"
+    assert (
+        await apply_patch(_context(root, store, {"artifact_id": artifact_id, "patch": patch}))
+    ).error == ""
+    assert (
+        await run_check(_context(root, store, {"artifact_id": artifact_id, "check_id": "unit"}))
+    ).error == ""
+    assert (
+        await commit(
+            _context(root, store, {"artifact_id": artifact_id, "message": "Change greeting"})
+        )
+    ).error == ""
+    assert (await cleanup_worktree(_context(root, store, {"artifact_id": artifact_id}))).error == ""
+
+    export_dir = tmp_path / ".lisa-patches" / artifact_id
+    export_dir.mkdir(parents=True)
+    (export_dir / "0009-stale.patch").write_text("stale", encoding="utf-8")
+    (export_dir / "notes.txt").write_text("keep", encoding="utf-8")
+
+    exported = await export_patches(_context(root, store, {"artifact_id": artifact_id}))
+
+    assert exported.error == ""
+    assert Path(exported.output_json["export_dir"]) == export_dir.resolve()
+    files = [Path(path) for path in exported.output_json["patch_files"]]
+    assert [path.name for path in files] == ["0001-Change-greeting.patch"]
+    assert sorted(path.name for path in export_dir.iterdir()) == [
+        "0001-Change-greeting.patch",
+        "notes.txt",
+    ]
+    assert "base-commit: " in files[0].read_text(encoding="utf-8")
+    assert exported.output_json["apply_command"].startswith("git am -3 ")
+
+    clone = tmp_path / "local"
+    await _git(tmp_path, "clone", "--quiet", str(root), str(clone))
+    await _git(clone, "config", "user.email", "test@example.invalid")
+    await _git(clone, "config", "user.name", "Lisa Test")
+    await _git(clone, "am", "-3", *map(str, files))
+    assert (clone / "app.txt").read_text(encoding="utf-8") == "hello world\n"
+
+
+@pytest.mark.asyncio
+async def test_export_patches_rejects_export_dir_inside_source(tmp_path: Path) -> None:
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {}))
+    artifact_id = created.output_json["artifact_id"]
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    artifact.commit_sha = artifact.base_sha
+    await store.save(artifact)
+    ctx = _context(root, store, {"artifact_id": artifact_id})
+    ctx.pack_config["patch_export_dir"] = str(root / "patches")
+
+    result = await export_patches(ctx)
+
+    assert "outside the source workspace" in result.error
 
 
 @pytest.mark.asyncio

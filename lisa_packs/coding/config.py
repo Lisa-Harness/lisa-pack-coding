@@ -75,6 +75,8 @@ class CodingPackConfig(BaseModel):
     max_command_output_bytes: int = Field(default=100_000, ge=4096, le=2_000_000)
     git_timeout_seconds: int = Field(default=60, ge=1, le=300)
     push_remote: str = Field(default="origin", min_length=1, max_length=100)
+    #: Absolute parent for exported patch series; empty means ``<source-parent>/.lisa-patches``.
+    patch_export_dir: str = ""
 
     @model_validator(mode="after")
     def _validate_checks(self) -> CodingPackConfig:

@@ -38,6 +38,7 @@ _LOCAL_WRITE_TOOLS = {
     "coding_prepare_workspace",
     "coding_run_check",
     "coding_commit",
+    "coding_export_patches",
     "coding_cleanup_worktree",
 }
 

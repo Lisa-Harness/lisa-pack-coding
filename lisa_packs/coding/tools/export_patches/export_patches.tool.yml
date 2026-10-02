@@ -1,0 +1,7 @@
+tool_id: coding_export_patches
+pack_id: lisa-pack-coding
+description: "Export an owned committed artifact (base..commit) as a git format-patch series outside the source workspace, returning the files and the git am command to apply them elsewhere. Works after worktree cleanup."
+exportable: true
+effect: write
+approval_required: true
+approval_preview: "export the committed artifact as a git format-patch series"

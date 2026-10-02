@@ -23,7 +23,7 @@ No modes, no operations — a deliberate **tool-only surface** plus two host
 commands. (The legacy `coding`/`learn` modes were removed; [test_catalog.py](
 lisa_packs/coding/tests/test_catalog.py) asserts this shape so it stays honest.)
 
-Fifteen tools, in two families:
+Sixteen tools, in two families:
 
 ### Git-workflow tools (the artifact lifecycle)
 
@@ -39,6 +39,7 @@ owned worktree, never the source checkout.
 | `coding_run_check` | write | ✓ | Run one named check through the bwrap owner's direct-write sandbox floor. Result records the current revision and candidate-tree hash; no host fallback. A `verify` check that rewrites files fails and its edits are reverted; a `fix` check's edits become a new revision (like a patch) and stale the other checks. |
 | `coding_commit` | write | ✓ | Stage commit candidates and commit only after required checks passed for this revision and tree, on the owned unprotected branch. The message may be any length and span multiple lines. |
 | `coding_push` | external_write | ✓ | Push the checked feature branch upstream (`push_remote`). **No force option exists.** |
+| `coding_export_patches` | write | ✓ | Write `base_sha..commit_sha` as a `git format-patch --base` series to `<patch_export_dir or source-parent/.lisa-patches>/<id>/` (outside the source tree, enforced) and return the `git am -3` command. Re-export replaces the prior series; works after cleanup. |
 | `coding_cleanup_worktree` | write | ✓ | Remove a **clean** owned worktree (`git worktree remove`, no force). |
 | `coding_status` | read | — | Report git status/diff + check state for an artifact without mutating it. |
 
@@ -80,10 +81,16 @@ startup) and **degrades gracefully** to `(none)` on failure.
 The intended pipeline, each step enforced in code:
 
 ```text
-create_worktree ─▶ edit_files ─▶ run_check ─▶ commit ─▶ push ─▶ (github pack opens PR)
-                  (revision +1)   (at this    (all required  ─┘
-                                   revision)   checks green)
+create_worktree ─▶ edit_files ─▶ run_check ─▶ commit ─┬▶ push ─▶ (github pack opens PR)
+                  (revision +1)   (at this    (all required │
+                                   revision)   checks green) └▶ export_patches ─▶ git am -3 (your checkout)
 ```
+
+To integrate locally without GitHub, ask for `coding_export_patches` after the
+commit, then in your own checkout run the returned command, e.g.
+`git am -3 ~/Code/.lisa-patches/<id>/*.patch`. The series keeps authorship,
+messages, and a `base-commit:` trailer, so `-3` can fall back to a three-way
+merge if your branch has moved on.
 
 Every artifact is a **`WorkProduct`** (`sdk.workproducts`) carrying a six-field
 host identity — `workspace_id`, `user_id`, `user_slug`, `surface_type`,
@@ -151,7 +158,8 @@ worktree — resolved via the shared `sdk.workspace.resolve_workspace_root`,
 strict `require_git=True`), `checks` (tuple of `{id, argv, timeout_seconds, kind}`,
 where `kind` is `verify` (default) or `fix`),
 `required_check_ids`, `branch_prefix` (`lisa/`), `protected_branches`
-(`main`,`master`), `push_remote` (`origin`), and the byte/line/result bounds
+(`main`,`master`), `push_remote` (`origin`), `patch_export_dir` (empty →
+`<source-parent>/.lisa-patches`; must be absolute and outside the source), and the byte/line/result bounds
 (`max_file_bytes` 512 000, `max_read_lines` 400, `max_patch_bytes` 200 000,
 `max_command_output_bytes` 100 000, `git_timeout_seconds` 60, …).
 

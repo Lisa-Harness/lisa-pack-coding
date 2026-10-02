@@ -23,6 +23,7 @@ EXPECTED_TOOLS = {
     "coding_commit",
     "coding_create_worktree",
     "coding_edit_files",
+    "coding_export_patches",
     "coding_find_files",
     "coding_list_directory",
     "coding_outline_source",
