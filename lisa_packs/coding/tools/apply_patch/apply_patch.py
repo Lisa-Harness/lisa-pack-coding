@@ -36,6 +36,64 @@ def normalize_patch(patch: str) -> str:
     return patch if patch.endswith("\n") else patch + "\n"
 
 
+def separate_file_sections(patch: str) -> str:
+    """Insert ``diff --git`` headers between bare file sections.
+
+    Models routinely emit multi-file patches as plain ``--- a/x`` / ``+++ b/x``
+    pairs with no ``diff --git`` separator. Under ``--recount`` git locates the
+    end of each hunk by scanning line prefixes, so the next section's ``---
+    a/other`` is consumed as a *deletion line* of the previous hunk and the
+    whole patch fails with a misleading ``patch failed: <file>:<line>`` that
+    names a line whose content looks correct (the 2026-10-03 docs-patch
+    incident: a valid README.md + CLI.md patch failed at README.md:266).
+    Without ``--recount`` the @@ counts are trusted and the same patch
+    applies; the separator terminates the hunk scan cleanly under both
+    parsings. Idempotent: sections already preceded by a ``diff --git``
+    line are left untouched.
+    """
+
+    out: list[str] = []
+    pending: str | None = None
+    section_has_header = True  # content before the first --- needs no header
+    for line in patch.splitlines():
+        if line.startswith(("diff --git ", "Index: ")):
+            section_has_header = True
+            pending = None
+            out.append(line)
+            continue
+        if line.startswith("--- "):
+            # Buffer the --- header until the paired +++ line names the
+            # target: a new-file section (--- /dev/null) must derive its
+            # separator from the +++ path, not /dev/null.
+            pending = line
+            continue
+        if pending is not None:
+            if line.startswith("+++ "):
+                if not section_has_header:
+                    target = line[4:].split("\t", maxsplit=1)[0].strip().removeprefix("b/")
+                    if target == "/dev/null":
+                        # Deletion of a file: the --- path names the target.
+                        target = (
+                            pending[4:].split("\t", maxsplit=1)[0].strip().removeprefix("a/")
+                        )
+                    out.append(f"diff --git a/{target} b/{target}")
+                section_has_header = False
+                out.append(pending)
+                out.append(line)
+            else:
+                # A --- line not paired with +++ is patch content; keep it.
+                out.append(pending)
+                out.append(line)
+            pending = None
+            continue
+        out.append(line)
+    if pending is not None:
+        out.append(pending)
+    if not out:
+        return patch
+    return "\n".join(out) + "\n"
+
+
 def reject_unanchored_hunks(patch: str) -> None:
     """Raise when a multi-hunk file diff has hunks with no context lines.
 
@@ -90,6 +148,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
 
     params = Parameters.model_validate(ctx.parameters)
     patch = normalize_patch(params.patch)
+    patch = separate_file_sections(patch)
     try:
         config = get_coding_config(ctx)
         if len(patch.encode("utf-8")) > config.max_patch_bytes:

@@ -389,6 +389,97 @@ async def test_patch_rejects_context_free_hunks_in_multi_hunk_file(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_patch_repairs_bare_multi_file_sections_without_diff_headers(
+    tmp_path: Path,
+) -> None:
+    """Multi-file patches without ``diff --git`` separators must apply.
+
+    The exact 2026-10-03 incident shape: glm-5.3 emitted a README.md +
+    CLI.md docs patch as bare ``--- a/x`` / ``+++ b/x`` pairs (no
+    ``diff --git`` separators) with no trailing newline and slightly
+    early @@ start lines. Under ``--recount`` git scans hunk lines by
+    prefix, so the second section's ``--- a/CLI.md`` was consumed as a
+    deletion line of the first hunk — the patch failed with a misleading
+    ``patch failed: README.md:266`` and the executor retried blindly.
+    ``separate_file_sections`` inserts the missing separators.
+    """
+
+    root = await _repository(tmp_path)
+    readme_lines = [f"README line {i}" for i in range(1, 10)]
+    readme_lines[4] = "curl -H \"$header\" -s http://dhcp/leases"
+    readme_lines[5] = "```"
+    readme_lines[6] = ""
+    readme_lines[7] = "These steps can be combined with SSH to allow remote access with tokens:"
+    (root / "README.md").write_text("\n".join(readme_lines) + "\n", encoding="utf-8")
+    (root / "CLI.md").write_text(
+        "CLI notes\n"
+        "\n"
+        "- **Token Acquisition**: fetch from the socket.\n"
+        "- **SSH Configuration**: connect without prompts.\n",
+        encoding="utf-8",
+    )
+    await _git(root, "add", "README.md", "CLI.md")
+    await _git(root, "commit", "-m", "docs")
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "token lifetime docs"}))
+    artifact_id = created.output_json["artifact_id"]
+    # Bare multi-file sections, no trailing newline, @@ start 2 lines early
+    # — mirrors the recorded incident payload byte for byte in shape.
+    patch = (
+        "--- a/README.md\n+++ b/README.md\n@@ -4,4 +4,6 @@\n"
+        " curl -H \"$header\" -s http://dhcp/leases\n"
+        " ```\n"
+        " \n"
+        "+Tokens are kept in memory only. When the server restarts, all "
+        "previously issued tokens are discarded.\n"
+        "+\n"
+        " These steps can be combined with SSH to allow remote access with tokens:\n"
+        "--- a/CLI.md\n+++ b/CLI.md\n@@ -2,3 +2,4 @@\n"
+        " \n"
+        " - **Token Acquisition**: fetch from the socket.\n"
+        "+- **Token Lifetime**: tokens are discarded on restart.\n"
+        " - **SSH Configuration**: connect without prompts."
+    )
+
+    patched = await apply_patch(_context(root, store, {"artifact_id": artifact_id, "patch": patch}))
+
+    assert patched.error == ""
+    worktree = Path(created.output_json["worktree_path"])
+    readme = (worktree / "README.md").read_text(encoding="utf-8")
+    assert "Tokens are kept in memory only." in readme
+    assert "- **Token Lifetime**: tokens are discarded on restart." in (
+        worktree / "CLI.md"
+    ).read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_patch_separator_repair_is_idempotent_for_proper_diffs(
+    tmp_path: Path,
+) -> None:
+    """Patches that already carry ``diff --git`` headers apply unchanged.
+
+    ``separate_file_sections`` must not double-insert separators on the
+    canonical format the pack itself produces (and ``patch_paths`` keeps
+    returning the same paths).
+    """
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "proper diff"}))
+    artifact_id = created.output_json["artifact_id"]
+    patch = (
+        "diff --git a/app.txt b/app.txt\n"
+        "--- a/app.txt\n+++ b/app.txt\n"
+        "@@ -1 +1 @@\n-hello\n+hello world\n"
+    )
+
+    patched = await apply_patch(_context(root, store, {"artifact_id": artifact_id, "patch": patch}))
+
+    assert patched.error == ""
+    assert patched.output_json["changed_paths"] == ["app.txt"]
+
+
+@pytest.mark.asyncio
 async def test_configured_check_ids_are_discoverable(tmp_path: Path) -> None:
     """The e2e executor guessed 'tests' and 'unittest' before finding 'test'."""
 
