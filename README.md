@@ -19,11 +19,22 @@ the controlling module for each.
 
 ## What the pack provides
 
-No modes, no operations — a deliberate **tool-only surface** plus two host
-commands. (The legacy `coding`/`learn` modes were removed; [test_catalog.py](
-lisa_packs/coding/tests/test_catalog.py) asserts this shape so it stays honest.)
+Sixteen tools, three modes, plus two host commands.
 
-Sixteen tools, in two families:
+**Modes** (added 2026-10-04, replacing the executor/reviewer personas that used
+to live in `lisa-pack-personas`):
+
+| Mode | Tools | Role |
+| --- | --- | --- |
+| `coding_design` | read tools | Design a change: research the codebase like `researcher` reads the web, then forge a durable design doc. No worktrees, no edits. |
+| `coding_review` | read tools | Read-only review of code/architecture; hand off findings. |
+| `coding_execute` | full lifecycle | Implement: create worktree → edit/patch → run checks → checked commit (`task_completion: checked_commit`). |
+
+`coding_design` is the entry point for "how should we build X" — it produces the
+artifact `coding_execute` consumes, closing the design→review→execute pipeline
+inside one pack.
+
+**Tools** in two families:
 
 ### Git-workflow tools (the artifact lifecycle)
 

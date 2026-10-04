@@ -1,4 +1,5 @@
 # Knowledge-capturing review, then a validated, committed fix.
+# Routes through the coding pack's own coding_review / coding_execute modes.
 # Run: uv run lisa-e2e run <this file>   (from the lisa framework checkout)
 id: coding/review-fix-commit
 session_context: session_context.md
@@ -9,7 +10,6 @@ packs:
   - lisa-pack-bwrap
   - lisa-pack-coding
   - lisa-pack-markdown
-  - lisa-pack-personas
 turns:
   - >-
     Review the Python project in the coding workspace for defects. Record what
