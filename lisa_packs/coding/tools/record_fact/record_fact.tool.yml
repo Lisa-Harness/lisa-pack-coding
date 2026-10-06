@@ -1,0 +1,7 @@
+tool_id: coding_record_fact
+pack_id: lisa-pack-coding
+description: "Record a verified conclusion about the checked worktree revision ({claim, at, revision}) so later turns can cite it without re-deriving it. Errors unless the claim's revision matches HEAD of the checked commit, the worktree is clean, and the check fingerprint is current — facts must outlive their own re-verification."
+exportable: true
+effect: write
+approval_required: true
+approval_preview: "record a verified fact about the checked worktree revision"
