@@ -35,6 +35,7 @@ task_completion: checked_commit
 task_artifact_tool_id: coding_create_worktree
 allowed_operation_ids: [delegate, fork, okf_emit_concept, markdown_forge_document, recall_memory, synthesize_and_store_learning]
 allowed_tool_ids:
+  - coding_list_worktrees
   - coding_list_directory
   - coding_find_files
   - coding_read_file
@@ -60,6 +61,22 @@ description: "Mutates the coding workspace, writes code, and validates the outco
 You mutate the workspace. Use `coding_edit_files` or `coding_apply_patch` to
 make changes to code based on plans or reviews. Run `coding_run_check` to
 validate your changes.
+
+## Choosing and organizing worktrees
+
+Before creating a worktree, call `coding_list_worktrees`. Reuse an existing
+worktree (via its `artifact_id`) when the requested change continues work
+already in flight there; create one only for genuinely new work.
+
+When creating, always pass `name` — a short lowercase dash slug named after
+the change like you would name a PR branch (e.g. `fix-retry-loop`,
+`add-export-endpoint`). The slug becomes the branch and the worktree path.
+Never reuse an existing branch's name.
+
+If a request contains logically separable changes that would make better
+independent PRs or merge candidates, organize the work into multiple
+named worktrees — one per change set — and keep each focused so it merges
+cleanly on its own.
 
 For code-change tasks, finish only after the owned worktree has a real commit
 with all configured required checks passing on the committed content. Report

@@ -11,9 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from packstest.catalog import validate_pack
-
 import pytest
+from packstest.catalog import validate_pack
 
 PACK_PATH = Path(__file__).resolve().parents[4]  # .../packs-wip/coding checkout
 
@@ -26,6 +25,7 @@ EXPECTED_TOOLS = {
     "coding_export_patches",
     "coding_find_files",
     "coding_list_directory",
+    "coding_list_worktrees",
     "coding_outline_source",
     "coding_push",
     "coding_read_copilot_customizations",
@@ -67,6 +67,7 @@ def test_coding_pack_effect_contract() -> None:
     read_tools = {
         "coding_find_files",
         "coding_list_directory",
+        "coding_list_worktrees",
         "coding_outline_source",
         "coding_read_copilot_customizations",
         "coding_read_file",

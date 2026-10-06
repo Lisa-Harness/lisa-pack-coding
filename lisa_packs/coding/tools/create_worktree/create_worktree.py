@@ -2,24 +2,44 @@
 
 from __future__ import annotations
 
+import re
+from uuid import uuid4
+
 from kernel.models import ToolExecutionContext, ToolResult
-from lisa_packs.coding.config import get_coding_config
-from lisa_packs.coding.workflow import CodingWorkflowError, run_git
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sdk.workproducts import WorkProduct
 
+from lisa_packs.coding.config import get_coding_config
+from lisa_packs.coding.workflow import CodingWorkflowError, run_git
+
 TOOL_ID = "coding_create_worktree"
+
+#: Branch-ref-safe slug: lowercase alnum runs separated by single dashes.
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$")
+
+
+def _normalize_name(name: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+    normalized = re.sub(r"-{2,}", "-", normalized)
+    if not normalized or not _SLUG_RE.match(normalized) or len(normalized) > 60:
+        raise CodingWorkflowError(
+            "name must normalize to a 1-60 char lowercase dash slug (a-z, 0-9)."
+        )
+    return normalized
 
 
 class Parameters(BaseModel):
     """Structured worktree creation request."""
 
     summary: str = ""
+    #: Optional model-chosen slug for the branch/worktree (e.g. "auth-refactor");
+    #: falls back to a random id so unnamed worktrees stay colliding-free.
+    name: str = Field(default="", max_length=100)
 
 
-def _branch_name(prefix: str, artifact_id: str) -> str:
-    normalized = prefix if prefix.endswith("/") else f"{prefix}-"
-    return f"{normalized}{artifact_id[:12]}"
+def _branch_name(prefix: str, slug: str) -> str:
+    normalized = prefix if prefix.endswith("/") else f"{prefix}/"
+    return f"{normalized}{slug}"
 
 
 async def execute(ctx: ToolExecutionContext) -> ToolResult:
@@ -34,7 +54,11 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             raise CodingWorkflowError("No code change artifact store is available.")
         base = await run_git(source_root, ("rev-parse", "HEAD"), config=config)
         if base.return_code != 0:
-            raise CodingWorkflowError(base.stderr.strip() or "Cannot resolve the source HEAD.")
+            raise CodingWorkflowError(
+                base.stderr.strip() or "Cannot resolve the source HEAD."
+            )
+        named = bool(params.name.strip())
+        slug = _normalize_name(params.name) if named else str(uuid4().hex[:12])
         artifact = WorkProduct(
             task_id=ctx.task_id,
             workspace_id=ctx.workspace_id,
@@ -46,30 +70,61 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             source_root=str(source_root),
             base_sha=base.stdout.strip(),
             head_sha=base.stdout.strip(),
-            branch=_branch_name(config.branch_prefix, "pending"),
+            branch=_branch_name(config.branch_prefix, slug),
             required_check_ids=list(config.required_check_ids),
             safe_summary=params.summary.strip(),
         )
-        artifact.branch = _branch_name(config.branch_prefix, artifact.artifact_id)
-        if artifact.branch in config.protected_branches:
+        if (
+            artifact.branch in config.protected_branches
+            or slug in config.protected_branches
+        ):
             raise CodingWorkflowError(
                 "Configured feature branch conflicts with a protected branch."
             )
         worktree_parent = source_root.parent / ".lisa-worktrees"
-        worktree_path = (worktree_parent / artifact.artifact_id).resolve()
+        # Unnamed worktrees keep the artifact-id directory (historical layout);
+        # named worktrees use the slug so the tree is self-describing.
+        worktree_path = (
+            worktree_parent / (slug if named else artifact.artifact_id)
+        ).resolve()
         try:
             worktree_path.relative_to(source_root)
         except ValueError:
             pass
         else:
-            raise CodingWorkflowError("Derived worktree path must be outside the source workspace.")
+            raise CodingWorkflowError(
+                "Derived worktree path must be outside the source workspace."
+            )
+        existing = await run_git(
+            source_root,
+            ("rev-parse", "--verify", f"refs/heads/{artifact.branch}"),
+            config=config,
+        )
+        if existing.return_code == 0:
+            raise CodingWorkflowError(
+                f"Branch '{artifact.branch}' already exists; choose another name "
+                "or reuse its worktree (coding_status with its artifact_id)."
+            )
+        if worktree_path.exists():
+            raise CodingWorkflowError(
+                f"Worktree path '{worktree_path}' already exists on disk."
+            )
         created = await run_git(
             source_root,
-            ("worktree", "add", "-b", artifact.branch, str(worktree_path), artifact.base_sha),
+            (
+                "worktree",
+                "add",
+                "-b",
+                artifact.branch,
+                str(worktree_path),
+                artifact.base_sha,
+            ),
             config=config,
         )
         if created.return_code != 0:
-            raise CodingWorkflowError(created.stderr.strip() or "git worktree add failed")
+            raise CodingWorkflowError(
+                created.stderr.strip() or "git worktree add failed"
+            )
         artifact.worktree_path = str(worktree_path)
         await store.create(artifact)
     except (CodingWorkflowError, OSError, ValueError) as exc:

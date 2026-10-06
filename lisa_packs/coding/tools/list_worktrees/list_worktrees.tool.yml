@@ -1,0 +1,5 @@
+tool_id: coding_list_worktrees
+pack_id: lisa-pack-coding
+description: "List owned coding worktrees (branch, path, artifact_id, status, revision, summary) so a model can name, find, and reuse them."
+exportable: true
+effect: read

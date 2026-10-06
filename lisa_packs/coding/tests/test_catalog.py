@@ -19,10 +19,12 @@ from sdk.content import (
     resolve_mode_roots,
     resolve_tool_roots,
 )
+
 from lisa_packs.coding import get_content_root
 
 # Read-only tools that inspect the source workspace or an owned worktree.
 _READ_TOOLS = {
+    "coding_list_worktrees",
     "coding_list_directory",
     "coding_find_files",
     "coding_read_file",
@@ -54,6 +56,7 @@ _ALL_TOOLS = _READ_TOOLS | _LOCAL_WRITE_TOOLS | _EXTERNAL_WRITE_TOOLS
 # execute mode adds the write lifecycle.
 _MODES = {"coding_execute", "coding_review", "coding_design"}
 _READ_ONLY_MODE_TOOLS = {
+    "coding_list_worktrees",
     "coding_list_directory",
     "coding_find_files",
     "coding_read_file",

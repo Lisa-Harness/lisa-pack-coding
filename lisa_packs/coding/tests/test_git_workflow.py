@@ -31,10 +31,15 @@ from lisa_packs.coding.tools.create_worktree.create_worktree import (
     execute as create_worktree,
 )
 from lisa_packs.coding.tools.edit_files.edit_files import execute as edit_files
-from lisa_packs.coding.tools.export_patches.export_patches import execute as export_patches
+from lisa_packs.coding.tools.export_patches.export_patches import (
+    execute as export_patches,
+)
 from lisa_packs.coding.tools.find_files.find_files import execute as find_files
 from lisa_packs.coding.tools.list_directory.list_directory import (
     execute as list_directory,
+)
+from lisa_packs.coding.tools.list_worktrees.list_worktrees import (
+    execute as list_worktrees,
 )
 from lisa_packs.coding.tools.outline_source.outline_source import (
     execute as outline_source,
@@ -146,6 +151,65 @@ def _context(
             else [],
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_create_worktree_uses_model_chosen_name_and_lists_owned(tmp_path: Path) -> None:
+    """A named worktree derives branch and directory from the slug, not a uuid."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+
+    created = await create_worktree(
+        _context(root, store, {"summary": "auth work", "name": "Auth Refactor!"})
+    )
+
+    assert created.error == ""
+    assert created.output_json["branch"] == "lisa/auth-refactor"
+    worktree_path = Path(created.output_json["worktree_path"])
+    assert worktree_path.name == "auth-refactor"
+    assert worktree_path.parent == root.parent / ".lisa-worktrees"
+    artifact = await store.get(created.output_json["artifact_id"])
+    assert artifact is not None
+    assert artifact.branch == "lisa/auth-refactor"
+    assert artifact.worktree_path == str(worktree_path)
+
+    listed = await list_worktrees(_context(root, store, {}))
+
+    assert listed.error == ""
+    entries = listed.output_json["worktrees"]
+    assert [(entry["artifact_id"]) for entry in entries] == [artifact.artifact_id]
+    assert entries[0]["branch"] == "lisa/auth-refactor"
+    assert entries[0]["worktree_exists"] is True
+    assert entries[0]["summary"] == "auth work"
+    assert listed.output_json["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_create_worktree_rejects_duplicate_name(tmp_path: Path) -> None:
+    """A second worktree with the same slug fails instead of clobbering."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "fix-retry-loop"}))
+    assert created.error == ""
+
+    duplicate = await create_worktree(_context(root, store, {"name": "fix retry loop"}))
+
+    assert "already exists" in duplicate.error
+
+
+@pytest.mark.asyncio
+async def test_create_worktree_rejects_invalid_and_protected_names(tmp_path: Path) -> None:
+    """Unsanitizable or protected slugs never reach git."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+
+    invalid = await create_worktree(_context(root, store, {"name": "!!!"}))
+    assert "slug" in invalid.error
+    protected = await create_worktree(_context(root, store, {"name": "main"}))
+    assert "protected" in protected.error
 
 
 @pytest.mark.asyncio

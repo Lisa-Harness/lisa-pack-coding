@@ -43,7 +43,8 @@ owned worktree, never the source checkout.
 
 | Tool | Effect | Approval | Role |
 | --- | --- | --- | --- |
-| `coding_create_worktree` | write | ✓ | Mint a task-bound artifact + `git worktree add` an isolated branch `<prefix><artifact_id>` at the source `HEAD`. Worktree lives at `<source-parent>/.lisa-worktrees/<id>` — **outside** the source tree, enforced. |
+| `coding_create_worktree` | write | ✓ | Mint a task-bound artifact + `git worktree add` an isolated branch at the source `HEAD`. Pass `name` (e.g. `auth-refactor`) for the branch `<prefix><name>` and worktree `<source-parent>/.lisa-worktrees/<name>`; without one a short random id is used. Name clashes and protected slugs fail fast. Worktree lives **outside** the source tree, enforced. |
+| `coding_list_worktrees` | read | — | List the session's owned worktrees for this workspace (branch, path, `artifact_id`, status, revision, summary) so the model can name, find, and reuse them. |
 | `coding_edit_files` | write | ✓ | Apply exact, hash-guarded replacements, creates, or deletes as one revision. The tool generates and prevalidates the Git patch. |
 | `coding_apply_patch` | write | ✓ | Prevalidate (`git apply --check`) and apply a bounded unified diff. Bumps `revision`, records `changed_paths`, **clears `checks`** (stale results are invalidated). |
 | `coding_prepare_workspace` | write | ✓ | Run a configured locked Python/uv preparation recipe in the owned sandbox and record preparation evidence. |
@@ -92,10 +93,17 @@ startup) and **degrades gracefully** to `(none)` on failure.
 The intended pipeline, each step enforced in code:
 
 ```text
-create_worktree ─▶ edit_files ─▶ run_check ─▶ commit ─┬▶ push ─▶ (github pack opens PR)
-                  (revision +1)   (at this    (all required │
-                                   revision)   checks green) └▶ export_patches ─▶ git am -3 (your checkout)
+list_worktrees ─▶ create_worktree ─▶ edit_files ─▶ run_check ─▶ commit ─┬▶ push ─▶ (github pack opens PR)
+ (reuse or name)   (`name` param)      (revision +1)   (at this    (all required │
+                                                         revision)   checks green) └▶ export_patches ─▶ git am -3 (your checkout)
 ```
+
+`coding_create_worktree` accepts an optional model-chosen `name` that becomes
+the branch (`<prefix><name>`, e.g. `lisa/auth-refactor`) and the worktree
+directory (`.lisa-worktrees/<name>`), so related work can be found, reused,
+and organized into cleanly-mergeable change sets. `coding_list_worktrees`
+lists owned worktrees (branch, status, summary, `artifact_id`) so a session
+can pick one back up instead of minting a new worktree per turn.
 
 To integrate locally without GitHub, ask for `coding_export_patches` after the
 commit, then in your own checkout run the returned command, e.g.
