@@ -842,6 +842,222 @@ async def test_structured_edits_require_fresh_hashes_and_validate_as_a_batch(
     assert "File changed since it was read" in stale.error
 
 
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("hello\n", "world\n"),
+        ("hello", "world"),
+        ("hello\n", "hello"),
+        ("hello", "hello\n"),
+        ("first\nhello", "first\nworld"),
+        ("hello\nlast", "world\nlast"),
+        ("hello\r\n", "world\r\n"),
+        ("first\r\nhello", "first\r\nworld"),
+        ("first\rhello\n", "first\rworld\n"),
+        ("first\vhello\n", "first\vworld\n"),
+        ("first\u2028hello\n", "first\u2028world\n"),
+        ("-- \nhello\n", "hello\n"),
+        ("hello\n", "++ \nhello\n"),
+        ("hello\n", ""),
+        ("café\nhello", "café\nworld"),
+        (
+            "hello\n" + "unchanged\n" * 10 + "last",
+            "world\n" + "unchanged\n" * 10 + "final",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_structured_edits_preserve_exact_file_bytes(
+    tmp_path: Path, before: str, after: str
+) -> None:
+    root = await _repository(tmp_path)
+    (root / "app.txt").write_bytes(before.encode("utf-8"))
+    await _git(root, "add", "app.txt")
+    await _git(root, "commit", "--allow-empty", "-m", "seed exact text")
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "exact byte edit"}))
+    artifact_id = created.output_json["artifact_id"]
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+
+    result = await edit_files(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "edits": [
+                    {
+                        "kind": "update",
+                        "path": "app.txt",
+                        "expected_sha256": hashlib.sha256(before.encode("utf-8")).hexdigest(),
+                        "replacements": [{"old_text": before, "new_text": after}],
+                    },
+                    {"kind": "create", "path": "nested/new.txt", "content": "new file\n"},
+                ],
+            },
+        )
+    )
+
+    assert result.error == "", result.error
+    assert result.output_json["revision"] == 1
+    assert result.output_json["changed_paths"] == ["app.txt", "nested/new.txt"]
+    assert len(result.output_json["patch_sha256"]) == 64
+    worktree = Path(artifact.worktree_path)
+    assert (worktree / "app.txt").read_bytes() == after.encode("utf-8")
+    assert (worktree / "nested/new.txt").read_bytes() == b"new file\n"
+    assert (root / "app.txt").read_bytes() == before.encode("utf-8")
+
+
+@pytest.mark.parametrize("content", ["", "hello", "hello\n", "hello\r\n", "-- \n++ \ncafé"])
+@pytest.mark.asyncio
+async def test_structured_edits_create_and_delete_exact_text(tmp_path: Path, content: str) -> None:
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "create and delete text"}))
+    artifact_id = created.output_json["artifact_id"]
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    path = Path(artifact.worktree_path, "new.txt")
+
+    added = await edit_files(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "edits": [{"kind": "create", "path": "new.txt", "content": content}],
+            },
+        )
+    )
+    assert added.error == "", added.error
+    assert path.read_bytes() == content.encode("utf-8")
+
+    deleted = await edit_files(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "edits": [
+                    {
+                        "kind": "delete",
+                        "path": "new.txt",
+                        "expected_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                    }
+                ],
+            },
+        )
+    )
+    assert deleted.error == "", deleted.error
+    assert deleted.output_json["revision"] == 2
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.asyncio
+async def test_structured_replacements_match_the_original_snapshot(
+    tmp_path: Path, reverse: bool
+) -> None:
+    root = await _repository(tmp_path)
+    before = "alpha beta\n"
+    (root / "app.txt").write_text(before, encoding="utf-8")
+    await _git(root, "add", "app.txt")
+    await _git(root, "commit", "-m", "seed independent replacements")
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "snapshot replacements"}))
+    artifact_id = created.output_json["artifact_id"]
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    replacements = [
+        {"old_text": "alpha", "new_text": "beta"},
+        {"old_text": "beta", "new_text": "gamma"},
+    ]
+    if reverse:
+        replacements.reverse()
+
+    result = await edit_files(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "edits": [
+                    {
+                        "kind": "update",
+                        "path": "app.txt",
+                        "expected_sha256": hashlib.sha256(before.encode("utf-8")).hexdigest(),
+                        "replacements": replacements,
+                    }
+                ],
+            },
+        )
+    )
+
+    assert result.error == "", result.error
+    assert Path(artifact.worktree_path, "app.txt").read_bytes() == b"beta gamma\n"
+
+
+@pytest.mark.parametrize(
+    ("before", "replacements", "error"),
+    [
+        (
+            "hello\n",
+            [{"old_text": "hello", "new_text": "hi"}, {"old_text": "hell", "new_text": "hey"}],
+            "overlap",
+        ),
+        (
+            "hello\n",
+            [{"old_text": "hello", "new_text": "hi"}, {"old_text": "hi", "new_text": "hey"}],
+            "exactly once",
+        ),
+        ("hello hello\n", [{"old_text": "hello", "new_text": "hi"}], "exactly once"),
+        ("aaa\n", [{"old_text": "aa", "new_text": "hi"}], "exactly once"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_structured_replacements_reject_invalid_batches_without_mutation(
+    tmp_path: Path, before: str, replacements: list[dict[str, str]], error: str
+) -> None:
+    root = await _repository(tmp_path)
+    (root / "app.txt").write_text(before, encoding="utf-8")
+    await _git(root, "add", "app.txt")
+    await _git(root, "commit", "--allow-empty", "-m", "seed invalid replacements")
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "invalid replacements"}))
+    artifact_id = created.output_json["artifact_id"]
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    worktree = Path(artifact.worktree_path)
+
+    result = await edit_files(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "edits": [
+                    {"kind": "create", "path": "new.txt", "content": "must not be written\n"},
+                    {
+                        "kind": "update",
+                        "path": "app.txt",
+                        "expected_sha256": hashlib.sha256(before.encode("utf-8")).hexdigest(),
+                        "replacements": replacements,
+                    },
+                ],
+            },
+        )
+    )
+
+    assert error in result.error
+    assert (worktree / "app.txt").read_bytes() == before.encode("utf-8")
+    assert not (worktree / "new.txt").exists()
+    persisted = await store.get(artifact_id)
+    assert persisted is not None
+    assert persisted.revision == 0
+    assert persisted.changed_paths == []
+
+
 @pytest.mark.asyncio
 async def test_read_file_uses_owned_worktree_revision_when_artifact_is_supplied(
     tmp_path: Path,

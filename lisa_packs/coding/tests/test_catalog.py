@@ -127,6 +127,16 @@ def test_execute_mode_carries_full_write_lifecycle() -> None:
     assert "github_open_pull_request" in allowed
 
 
+def test_edit_descriptions_prefer_original_snapshot_replacements() -> None:
+    tools, _ = _catalog()
+
+    description = tools["coding_edit_files"]["description"]
+    assert "preferred edit tool" in description
+    assert "original file snapshot" in description
+    assert "must not overlap" in description
+    assert "Prefer coding_edit_files" in tools["coding_apply_patch"]["description"]
+
+
 def test_modes_route_by_mode_id() -> None:
     """Mode ids are namespaced to the pack and routable."""
     _, modes = _catalog()
@@ -144,4 +154,3 @@ def test_every_tool_reports_this_pack_id() -> None:
     assert tools, "expected at least one tool in the catalog"
     for tool_id, spec in tools.items():
         assert spec["pack_id"] == "lisa-pack-coding", tool_id
-

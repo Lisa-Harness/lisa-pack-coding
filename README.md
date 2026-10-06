@@ -45,8 +45,8 @@ owned worktree, never the source checkout.
 | --- | --- | --- | --- |
 | `coding_create_worktree` | write | ✓ | Mint a task-bound artifact + `git worktree add` an isolated branch at the source `HEAD`. Pass `name` (e.g. `auth-refactor`) for the branch `<prefix><name>` and worktree `<source-parent>/.lisa-worktrees/<name>`; without one a short random id is used. Name clashes and protected slugs fail fast. Worktree lives **outside** the source tree, enforced. |
 | `coding_list_worktrees` | read | — | List the session's owned worktrees for this workspace (branch, path, `artifact_id`, status, revision, summary) so the model can name, find, and reuse them. |
-| `coding_edit_files` | write | ✓ | Apply exact, hash-guarded replacements, creates, or deletes as one revision. The tool generates and prevalidates the Git patch. |
-| `coding_apply_patch` | write | ✓ | Prevalidate (`git apply --check`) and apply a bounded unified diff. Bumps `revision`, records `changed_paths`, **clears `checks`** (stale results are invalidated). |
+| `coding_edit_files` | write | ✓ | Preferred editor: apply exact, hash-guarded replacements, creates, or deletes as one revision. Replacements match the original snapshot and must not overlap. The tool generates and prevalidates the Git patch, preserving supplied content and EOF newlines. |
+| `coding_apply_patch` | write | ✓ | Fallback for existing unified diffs: prevalidate (`git apply --check`) and apply a bounded patch. Bumps `revision`, records `changed_paths`, **clears `checks`** (stale results are invalidated). |
 | `coding_prepare_workspace` | write | ✓ | Run a configured locked Python/uv preparation recipe in the owned sandbox and record preparation evidence. |
 | `coding_run_check` | write | ✓ | Run one named check through the bwrap owner's direct-write sandbox floor. Result records the current revision and candidate-tree hash; no host fallback. A `verify` check that rewrites files fails and its edits are reverted; a `fix` check's edits become a new revision (like a patch) and stale the other checks. |
 | `coding_commit` | write | ✓ | Stage commit candidates and commit only after required checks passed for this revision and tree, on the owned unprotected branch. The message may be any length and span multiple lines. |
@@ -65,6 +65,21 @@ Complete valid UTF-8 files return `content_sha256` and `editable: true`, even
 when only a line window is shown. Pass that whole-file hash as
 `expected_sha256` to `coding_edit_files`. Truncated or invalid UTF-8 reads are
 not edit-ready and return no hash.
+
+For updates, every `old_text` must occur exactly once in the original file
+snapshot, including whitespace. Replacements are independent and their order
+does not matter: they cannot overlap or refer to text inserted by another
+replacement. After a stale-hash rejection, reread the file and rebuild the
+edits against the new snapshot. No fuzzy matching or newline normalization is
+performed. All files are validated before application, and an inapplicable
+hunk rejects the whole Git patch; this is not a crash-safe transaction across
+filesystem writes and artifact persistence.
+
+Calls that mutate the same artifact must be serialized by the caller. The
+pack does not hold a shared lifecycle lock across edit, check, and commit
+operations. Concurrent edits can overwrite artifact metadata, and a failed
+artifact save can leave already-applied file changes unrecorded; inspect and
+reconcile the worktree and artifact before retrying in either case.
 
 | Tool | Effect | Cap | Role |
 | --- | --- | --- | --- |

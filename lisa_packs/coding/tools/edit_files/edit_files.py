@@ -5,10 +5,12 @@ from __future__ import annotations
 import difflib
 from dataclasses import dataclass
 from hashlib import sha256
+from itertools import islice
+from pathlib import Path
 from typing import Literal
 
 from kernel.models import ToolExecutionContext, ToolResult
-from lisa_packs.coding.config import get_coding_config
+from lisa_packs.coding.config import CodingPackConfig, get_coding_config
 from lisa_packs.coding.local_files import (
     CodingPathError,
     read_utf8_file_snapshot,
@@ -38,7 +40,7 @@ class FileEdit(BaseModel):
     kind: Literal["update", "create", "delete"]
     path: str = Field(min_length=1, max_length=500)
     expected_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    replacements: list[Replacement] = Field(default_factory=list, max_length=50)
+    replacements: list[Replacement] = Field(default_factory=list[Replacement], max_length=50)
     content: str | None = Field(default=None, max_length=500_000)
 
     @model_validator(mode="after")
@@ -70,15 +72,41 @@ class PreparedEdit:
     after: str | None
 
 
-def _replace_exactly_once(source: str, replacement: Replacement) -> str:
-    """Replace a source fragment only when it has one unambiguous occurrence."""
+def _replace_snapshot(source: str, replacements: list[Replacement]) -> str:
+    """Apply unique, non-overlapping replacements against the original snapshot."""
 
-    matches = source.count(replacement.old_text)
-    if matches != 1:
-        raise CodingWorkflowError(
-            "Each old_text must occur exactly once in the original file snapshot."
-        )
-    return source.replace(replacement.old_text, replacement.new_text, 1)
+    spans: list[tuple[int, int, str]] = []
+    for replacement in replacements:
+        start = source.find(replacement.old_text)
+        if start < 0 or source.find(replacement.old_text, start + 1) >= 0:
+            raise CodingWorkflowError(
+                "Each old_text must occur exactly once in the original file snapshot."
+            )
+        spans.append((start, start + len(replacement.old_text), replacement.new_text))
+
+    parts: list[str] = []
+    cursor = 0
+    for start, end, new_text in sorted(spans):
+        if start < cursor:
+            raise CodingWorkflowError(
+                "Replacement spans must not overlap in the original file snapshot."
+            )
+        parts.extend((source[cursor:start], new_text))
+        cursor = end
+    parts.append(source[cursor:])
+    return "".join(parts)
+
+
+def _diff_lines(content: str | None) -> list[str]:
+    """Split at LF only, preserving other separators as literal file content."""
+
+    if content is None:
+        return []
+    parts = content.split("\n")
+    lines = [part + "\n" for part in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
 
 
 def _unified_patch(edits: list[PreparedEdit]) -> str:
@@ -86,8 +114,8 @@ def _unified_patch(edits: list[PreparedEdit]) -> str:
 
     lines: list[str] = []
     for edit in edits:
-        before = [] if edit.before is None else edit.before.splitlines(keepends=True)
-        after = [] if edit.after is None else edit.after.splitlines(keepends=True)
+        before = _diff_lines(edit.before)
+        after = _diff_lines(edit.after)
         lines.extend((f"diff --git a/{edit.path} b/{edit.path}\n",))
         if edit.before is None:
             lines.extend(("new file mode 100644\n", "--- /dev/null\n", f"+++ b/{edit.path}\n"))
@@ -95,16 +123,37 @@ def _unified_patch(edits: list[PreparedEdit]) -> str:
             lines.extend(("deleted file mode 100644\n", f"--- a/{edit.path}\n", "+++ /dev/null\n"))
         else:
             lines.extend((f"--- a/{edit.path}\n", f"+++ b/{edit.path}\n"))
-        lines.extend(
-            difflib.unified_diff(
-                before,
-                after,
-                fromfile="",
-                tofile="",
-                n=3,
-            )
-        )
-    return "".join(line for line in lines if not line.startswith(("--- \n", "+++ \n")))
+        diff = difflib.unified_diff(before, after, n=3)
+        for line in islice(diff, 2, None):
+            if line.endswith("\n"):
+                lines.append(line)
+            else:
+                lines.extend((line + "\n", "\\ No newline at end of file\n"))
+    return "".join(lines)
+
+
+def _prepare_edit(edit: FileEdit, *, worktree: Path, config: CodingPackConfig) -> PreparedEdit:
+    """Validate one file action and compute its desired snapshot without writing."""
+
+    path = resolve_relative_path_at_root(worktree, edit.path)
+    if edit.kind == "create":
+        if path.exists():
+            raise CodingWorkflowError(f"Cannot create existing file: {edit.path}")
+        assert edit.content is not None
+        if len(edit.content.encode("utf-8")) > config.max_file_bytes:
+            raise CodingWorkflowError("Created content exceeds the configured file byte limit.")
+        return PreparedEdit(path=edit.path, before=None, after=edit.content)
+    if not path.is_file():
+        raise CodingWorkflowError(f"Requested edit path is not a file: {edit.path}")
+    before, digest = read_utf8_file_snapshot(path, max_bytes=config.max_file_bytes)
+    if digest != edit.expected_sha256:
+        raise CodingWorkflowError(f"File changed since it was read: {edit.path}")
+    if edit.kind == "delete":
+        return PreparedEdit(path=edit.path, before=before, after=None)
+    after = _replace_snapshot(before, edit.replacements)
+    if len(after.encode("utf-8")) > config.max_file_bytes:
+        raise CodingWorkflowError("Edited content exceeds the configured file byte limit.")
+    return PreparedEdit(path=edit.path, before=before, after=after)
 
 
 async def execute(ctx: ToolExecutionContext) -> ToolResult:
@@ -120,32 +169,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         if len({edit.path for edit in params.edits}) != len(params.edits):
             raise CodingWorkflowError("Each structured edit path must be unique.")
 
-        prepared: list[PreparedEdit] = []
-        for edit in params.edits:
-            path = resolve_relative_path_at_root(worktree, edit.path)
-            if edit.kind == "create":
-                if path.exists():
-                    raise CodingWorkflowError(f"Cannot create existing file: {edit.path}")
-                assert edit.content is not None
-                if len(edit.content.encode("utf-8")) > config.max_file_bytes:
-                    raise CodingWorkflowError("Created content exceeds the configured file byte limit.")
-                prepared.append(PreparedEdit(path=edit.path, before=None, after=edit.content))
-                continue
-            if not path.is_file():
-                raise CodingWorkflowError(f"Requested edit path is not a file: {edit.path}")
-            before, digest = read_utf8_file_snapshot(path, max_bytes=config.max_file_bytes)
-            if digest != edit.expected_sha256:
-                raise CodingWorkflowError(f"File changed since it was read: {edit.path}")
-            if edit.kind == "delete":
-                prepared.append(PreparedEdit(path=edit.path, before=before, after=None))
-                continue
-            after = before
-            for replacement in edit.replacements:
-                after = _replace_exactly_once(after, replacement)
-            if len(after.encode("utf-8")) > config.max_file_bytes:
-                raise CodingWorkflowError("Edited content exceeds the configured file byte limit.")
-            prepared.append(PreparedEdit(path=edit.path, before=before, after=after))
-
+        prepared = [_prepare_edit(edit, worktree=worktree, config=config) for edit in params.edits]
         changed = [edit for edit in prepared if edit.before != edit.after]
         if not changed:
             raise CodingWorkflowError("Structured edit batch makes no changes.")
@@ -180,7 +204,9 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
 
     return ToolResult(
         tool_id=TOOL_ID,
-        output_text=f"Applied structured edits to {len(changed)} paths at revision {artifact.revision}.",
+        output_text=(
+            f"Applied structured edits to {len(changed)} paths at revision {artifact.revision}."
+        ),
         output_json={
             "artifact_id": artifact.artifact_id,
             "revision": artifact.revision,

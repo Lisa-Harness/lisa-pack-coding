@@ -1,6 +1,6 @@
 tool_id: coding_edit_files
 pack_id: lisa-pack-coding
-description: "Atomically apply bounded exact text edits to an owned worktree. Each existing file needs its current complete-file SHA-256 digest; every old_text must match exactly once. Use this preferred edit tool instead of manually calculating unified-diff hunk counts."
+description: "Validate bounded exact text edits, then apply them as one Git patch to an owned worktree. Each existing file needs its current complete-file SHA-256 digest. Every old_text must match exactly once in the original file snapshot, and replacement spans must not overlap; replacement order does not matter. Content and trailing newlines are preserved exactly as supplied. Use this preferred edit tool instead of manually calculating unified-diff hunk counts."
 exportable: true
 effect: write
 approval_required: true

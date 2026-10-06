@@ -1,6 +1,6 @@
 tool_id: coding_apply_patch
 pack_id: lisa-pack-coding
-description: "Prevalidate and apply a bounded unified diff inside an owned worktree. The patch must contain --- a/path and +++ b/path headers and numbered @@ -old_start,old_count +new_start,new_count @@ hunks with accurate line counts. Do not use *** Begin Patch, *** Update File, or unnumbered @@ hunks. If rejected, inspect the current file and submit a corrected unified diff; do not repeat the unchanged patch."
+description: "Prevalidate and apply an existing bounded unified diff inside an owned worktree. Prefer coding_edit_files for ordinary text changes; use this tool as the unified-diff fallback. The patch must contain --- a/path and +++ b/path headers and numbered @@ -old_start,old_count +new_start,new_count @@ hunks with accurate line counts. Do not use *** Begin Patch, *** Update File, or unnumbered @@ hunks. If rejected, inspect the current file and submit a corrected unified diff; do not repeat the unchanged patch."
 exportable: true
 effect: write
 approval_required: true

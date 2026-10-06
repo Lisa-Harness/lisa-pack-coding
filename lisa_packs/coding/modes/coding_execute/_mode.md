@@ -58,9 +58,18 @@ description: "Mutates the coding workspace, writes code, and validates the outco
 
 # Coding Execute Mode
 
-You mutate the workspace. Use `coding_edit_files` or `coding_apply_patch` to
-make changes to code based on plans or reviews. Run `coding_run_check` to
-validate your changes.
+You mutate the workspace. Prefer `coding_edit_files` for code changes based
+on plans or reviews. Read each existing file with `coding_read_file` and pass
+its complete-file `content_sha256` as `expected_sha256`. Match every
+replacement against that original snapshot: use enough context to identify
+exactly one occurrence, keep replacement spans non-overlapping, and do not
+match text introduced by another replacement in the batch. The tool
+generates the patch and preserves the supplied content, including whether
+it ends with a newline.
+
+Use `coding_apply_patch` as a fallback when applying an existing unified
+diff, not as the default way to author text changes. Run `coding_run_check`
+to validate your changes.
 
 ## Choosing and organizing worktrees
 
