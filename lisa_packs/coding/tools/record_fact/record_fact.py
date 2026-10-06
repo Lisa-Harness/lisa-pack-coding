@@ -20,15 +20,18 @@ tree that has since drifted — that is the bug this gate exists to prevent.
 from __future__ import annotations
 
 from kernel.models import ToolExecutionContext, ToolResult
+from pydantic import BaseModel, Field
+
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.workflow import (
     CodingWorkflowError,
+    artifact_has_current_required_checks,
     artifact_worktree,
+    candidate_tree_sha,
     load_owned_artifact,
     preparation_is_current,
     run_git,
 )
-from pydantic import BaseModel, Field
 
 TOOL_ID = "coding_record_fact"
 
@@ -71,7 +74,9 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             config=config,
         )
         if not artifact.commit_sha:
-            raise CodingWorkflowError("artifact has no checked commit; nothing to verify against")
+            raise CodingWorkflowError(
+                "artifact has no checked commit; nothing to verify against"
+            )
         worktree = artifact_worktree(artifact, config=config)
         status = await run_git(worktree, ("status", "--porcelain"), config=config)
         if status.return_code != 0:
@@ -80,17 +85,30 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             raise CodingWorkflowError(
                 "worktree is dirty; facts can only be recorded against a clean checked commit"
             )
-        if not preparation_is_current(artifact, worktree, config=config):
+        if not preparation_is_current(artifact, worktree=worktree, config=config):
             raise CodingWorkflowError(
-                "artifact's checks fingerprint is stale for HEAD; re-run checks before recording"
+                "workspace preparation is stale; re-run preparation before recording"
             )
         head = await run_git(worktree, ("rev-parse", "HEAD"), config=config)
         if head.return_code != 0:
             raise CodingWorkflowError(head.stderr.strip() or "git rev-parse failed")
+        if head.stdout.strip() != artifact.commit_sha:
+            raise CodingWorkflowError(
+                "owned worktree HEAD no longer matches the recorded commit"
+            )
         if not revisions_match(params.revision, head.stdout):
             raise CodingWorkflowError(
                 f"claim's revision {params.revision!r} does not match HEAD {head.stdout.strip()!r}; "
                 "facts must be recorded against the current checked commit"
+            )
+        if not artifact_has_current_required_checks(
+            artifact,
+            candidate_tree=await candidate_tree_sha(
+                worktree, config=config, paths=artifact.changed_paths
+            ),
+        ):
+            raise CodingWorkflowError(
+                "required check fingerprints are stale for HEAD; re-run checks before recording"
             )
     except (CodingWorkflowError, OSError, ValueError) as exc:
         return ToolResult(tool_id=TOOL_ID, error=str(exc))

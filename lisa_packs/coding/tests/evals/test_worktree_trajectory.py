@@ -306,6 +306,20 @@ async def test_real_go_worktree_repair_trajectory(
         },
     )
     assert committed.result.error == "", committed.result.error
+    fact = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_record_fact",
+        {
+            "artifact_id": artifact_id,
+            "claim": "The repaired greeting passes its Go test.",
+            "at": "greeting.go:3",
+            "revision": committed.result.output_json["commit_sha"],
+        },
+    )
+    assert fact.result.error == "", fact.result.error
+    assert fact.result.output_json["fact"]["revision"] == committed.result.output_json["commit_sha"]
     published = await _step(
         catalog, factory, trajectory, "coding_push", {"artifact_id": artifact_id}
     )
