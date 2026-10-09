@@ -10,6 +10,7 @@ packs:
   - lisa-pack-bwrap
   - lisa-pack-coding
   - lisa-pack-markdown
+  - lisa-pack-personas
 turns:
   - >-
     Review the Python project in the coding workspace for defects. Record what
@@ -41,7 +42,8 @@ oracles:
     - workproduct_committed: {}
     - branch_prefix: {prefix: "lisa/"}
     - main_untouched: {}
-    - diff_touches: {paths: [stats.py], exact: true}
+    - diff_touches: {paths: [stats.py], allow: [test_stats.py], exact: true}
     - checks_current: {}
     - worktree_clean: {}
     - independent_check: {argv: [python3, -m, unittest]}
+    - independent_check: {argv: [python3, -m, unittest], restore: [test_stats.py]}
