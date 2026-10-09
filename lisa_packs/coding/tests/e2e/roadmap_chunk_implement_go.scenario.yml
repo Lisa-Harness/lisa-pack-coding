@@ -1,0 +1,70 @@
+# Go analogue of coding/roadmap-chunk-implement, closer to the live
+# dnsmasq-web session that read-looped in coding_execute: a multi-package Go
+# daemon with repository customizations (.github/copilot-instructions.md and a
+# golang skill with references), so reading everything is expensive. The
+# contract is settled across discussion turns and the implementation request
+# names the work only by reference. Judged by hidden Go acceptance tests that
+# mirror acceptance/test_trust_the_pin.py.
+# Run: uv run lisa-e2e run <this file>   (from the lisa framework checkout)
+id: coding/roadmap-chunk-implement-go
+session_context: session_context_go.md
+fixture:
+  repo: fixtures/leasewarden
+packs:
+  - lisa-pack-bash
+  - lisa-pack-bwrap
+  - lisa-pack-coding
+  - lisa-pack-markdown
+  - lisa-pack-personas
+turns:
+  - >-
+    I don't think anyone has looked at what leasewarden actually does as a
+    product. Review the project in the coding workspace from the point of
+    view of a home-lab operator running dnsmasq: what jobs does it do for
+    them, where is it weak, and what is missing? Propose a prioritized
+    roadmap of features grouped into a few chunks.
+  - >-
+    Name this list so that we can refer back to it. The first chunk is "Trust
+    the pin": let the operator turn a device's current lease into a
+    reservation, and refuse reservations whose ip is already taken by another
+    device. Propose the design for that chunk and save it as a document.
+  - >-
+    Why would pinning a lease need its own endpoint? Is it bad form to just
+    let POST /reservations omit "ip"? Let's do that: when "ip" is missing,
+    pin the MAC's active lease — use the lease's ip, and its hostname unless
+    the body gives one — and respond 422 {"error": "no_active_lease"} when the
+    MAC has no active lease. A lease is active when its expiry is 0 or in the
+    future. POST and PUT respond 409 {"error": "ip_conflict",
+    "conflicting_mac": "<mac>"} when the ip is reserved for a different MAC
+    or held by a different MAC's active lease; expired leases never
+    conflict, re-saving a MAC with its own ip is fine, and nothing is stored
+    or published on a conflict. Update the design document to match.
+  - cool cool. Ok, lets get started on the first chunk then!
+approvals:
+  approve: ["*"]
+  deny: [coding_push, coding_cleanup_worktree]
+budgets:
+  max_messages: 24
+  max_continues: 0
+  max_yield_replies: 0
+  wall_clock_s: 3600
+oracles:
+  hygiene:
+    - not_aborted: {}
+    - no_turn_errors: {}
+    - no_operator_exit: {}
+    - no_unanswered_yield: {}
+    - no_runtime_errors: {}
+  review:
+    - receipt: {capability: [coding_read_file, coding_search_code, coding_outline_source]}
+  design:
+    - data_check: {argv: [grep, -rlq, --include=*.md, no_active_lease, .]}
+  implement:
+    - baseline_fails: {argv: [bash, "${SCENARIO_DIR}/acceptance/go_trust_the_pin.sh"]}
+    - workproduct_committed: {}
+    - branch_prefix: {prefix: "lisa/"}
+    - main_untouched: {}
+    - checks_current: {}
+    - worktree_clean: {}
+    - independent_check: {argv: [go, test, -count=1, ./...], restore: ["*_test.go"], timeout_s: 300}
+    - independent_check: {argv: [bash, "${SCENARIO_DIR}/acceptance/go_trust_the_pin.sh"], timeout_s: 300}

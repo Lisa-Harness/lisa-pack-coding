@@ -1,0 +1,6 @@
+.lisa-go-cache/
+.lisa-go-path/
+dist/
+*.db
+/leasewarden
+*.pid
