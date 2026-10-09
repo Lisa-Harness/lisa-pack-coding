@@ -85,7 +85,7 @@ reconcile the worktree and artifact before retrying in either case.
 | --- | --- | --- | --- |
 | `coding_list_directory` | read | 50/turn | Bounded directory listing. |
 | `coding_find_files` | read | 50/turn | Enumerate non-generated source files. |
-| `coding_read_file` | read | 50/turn | Byte- and line-bounded text excerpt (binary rejected). |
+| `coding_read_file` | read | 50/turn | Byte- and line-bounded excerpt, one `<line>\t<text>` row per line (binary rejected). |
 | `coding_search_code` | read | 40/turn | Bounded ripgrep JSON search. |
 | `coding_outline_source` | read | 50/turn | Bounded structural outline of a source file. |
 | `coding_read_copilot_customizations` | read | 10/turn | Parse `.github/{instructions,agents,prompts,skills}` / `.claude` files into structured front-matter + body. `default_available: false`. |

@@ -53,13 +53,17 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     start_line = params.start_line
     end_line = max(start_line, min(params.end_line, start_line + config.max_read_lines - 1))
     all_lines = text.splitlines()
-    excerpt = [
-        {"line": number, "text": all_lines[number - 1]}
-        for number in range(start_line, min(end_line, len(all_lines)) + 1)
-    ]
+    last_line = min(end_line, len(all_lines))
+    width = len(str(last_line))
+    # One text block with ``cat -n`` style prefixes keeps exact line numbers at
+    # ~1.2x the source size; a JSON object per line cost ~3x once rendered.
+    excerpt = "\n".join(
+        f"{number:>{width}}\t{all_lines[number - 1]}" for number in range(start_line, last_line + 1)
+    )
+    line_count = max(0, last_line - start_line + 1)
     return ToolResult(
         tool_id=TOOL_ID,
-        output_text=f"Read {len(excerpt)} lines from {params.path}.",
+        output_text=f"Read {line_count} lines from {params.path}.",
         output_json={
             "path": params.path,
             "scope": read_root.scope,
@@ -67,7 +71,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             "content_sha256": content_sha256,
             "editable": content_sha256 is not None,
             "start_line": start_line,
-            "end_line": excerpt[-1]["line"] if excerpt else start_line,
+            "end_line": last_line if line_count else start_line,
             "total_lines_observed": len(all_lines),
             "truncated_by_bytes": byte_truncated,
             "excerpt": excerpt,

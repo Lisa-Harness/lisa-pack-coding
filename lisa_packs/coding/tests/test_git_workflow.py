@@ -1085,7 +1085,7 @@ async def test_read_file_uses_owned_worktree_revision_when_artifact_is_supplied(
     )
 
     assert read.error == ""
-    assert read.output_json["excerpt"] == [{"line": 1, "text": "hello from the worktree"}]
+    assert read.output_json["excerpt"] == "1\thello from the worktree"
     assert (root / "app.txt").read_text(encoding="utf-8") == "hello\n"
 
 
@@ -1119,12 +1119,10 @@ async def test_read_file_defaults_to_the_unambiguous_task_worktree(tmp_path: Pat
 
     assert automatic.output_json["scope"] == "worktree"
     assert automatic.output_json["artifact_id"] == artifact_id
-    assert automatic.output_json["excerpt"] == [
-        {"line": 1, "text": "hello from the task worktree"}
-    ]
+    assert automatic.output_json["excerpt"] == "1\thello from the task worktree"
     assert source.output_json["scope"] == "source"
     assert source.output_json["artifact_id"] is None
-    assert source.output_json["excerpt"] == [{"line": 1, "text": "hello"}]
+    assert source.output_json["excerpt"] == "1\thello"
 
 
 @pytest.mark.asyncio

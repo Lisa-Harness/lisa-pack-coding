@@ -889,7 +889,7 @@ async def test_full_worktree_trajectory(
         {"artifact_id": artifact_id, "path": "app.txt"},
     )
     assert run.result.error == ""
-    assert run.result.output_json["excerpt"][0]["text"] == "hello"
+    assert run.result.output_json["excerpt"] == "1\thello"
 
     run = await _step(
         catalog,

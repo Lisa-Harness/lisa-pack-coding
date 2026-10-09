@@ -1,6 +1,6 @@
 tool_id: coding_read_file
 pack_id: lisa-pack-coding
-description: "Read fresh bounded text, defaulting to the task's owned worktree. Complete valid UTF-8 files return content_sha256 for coding_edit_files expected_sha256; truncated or invalid UTF-8 reads are not editable."
+description: "Read fresh bounded text, defaulting to the task's owned worktree. Complete valid UTF-8 files return content_sha256 for coding_edit_files expected_sha256; truncated or invalid UTF-8 reads are not editable. excerpt prefixes each line with its line number and a tab; old_text must omit that prefix."
 exportable: true
 effect: read
 max_calls_per_turn: 50

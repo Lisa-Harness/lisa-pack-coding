@@ -58,6 +58,36 @@ async def test_read_file_rejects_binary_and_bounds_text(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_file_numbers_lines_as_compact_text(tmp_path: Path) -> None:
+    """Excerpts are ``cat -n`` style text: exact lines, numbers padded to the window.
+
+    A JSON object per line rendered ~3x the source bytes, pushing ordinary
+    reads past the projection's inline cap so the model saw only previews
+    and re-read files in shrinking windows (2026-10-08 turn 618).
+    """
+
+    first, last, past_eof = 8, 12, 40
+    root = _workspace(tmp_path)
+    lines = [f'\tfmt.Println("line {index}")' for index in range(1, last + 1)]
+    (root / "main.go").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    read = await read_file(_context(root, {"path": "main.go", "start_line": first, "end_line": 50}))
+    assert read.error == ""
+    assert read.output_text == "Read 5 lines from main.go."
+    assert read.output_json["start_line"] == first
+    assert read.output_json["end_line"] == last
+    assert read.output_json["excerpt"].splitlines() == [
+        f"{number:>2}\t{lines[number - 1]}" for number in range(first, last + 1)
+    ]
+    source = "\n".join(lines[first - 1 :])
+    assert len(read.output_json["excerpt"]) <= len(source) + 4 * 5
+
+    past_end = await read_file(_context(root, {"path": "main.go", "start_line": past_eof}))
+    assert past_end.output_text == "Read 0 lines from main.go."
+    assert past_end.output_json["excerpt"] == ""
+    assert past_end.output_json["end_line"] == past_eof
+
+
+@pytest.mark.asyncio
 async def test_read_file_returns_exact_snapshot_hash_only_for_editable_text(tmp_path: Path) -> None:
     """Line windows carry a whole-file byte hash without certifying lossy reads."""
 
@@ -67,7 +97,7 @@ async def test_read_file_returns_exact_snapshot_hash_only_for_editable_text(tmp_
     path.write_bytes(original)
     read = await read_file(_context(root, {"path": "exact.txt", "end_line": 1}))
     assert read.error == ""
-    assert read.output_json["excerpt"] == [{"line": 1, "text": "first"}]
+    assert read.output_json["excerpt"] == "1\tfirst"
     assert read.output_json["editable"] is True
     assert read.output_json["content_sha256"] == hashlib.sha256(original).hexdigest()
 
