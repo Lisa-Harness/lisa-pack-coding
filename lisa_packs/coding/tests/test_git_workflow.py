@@ -31,6 +31,7 @@ from lisa_packs.coding.tools.create_worktree.create_worktree import (
     execute as create_worktree,
 )
 from lisa_packs.coding.tools.edit_files.edit_files import execute as edit_files
+from lisa_packs.coding.tools.edit_files.edit_files import preflight as preflight_edit_files
 from lisa_packs.coding.tools.export_patches.export_patches import (
     execute as export_patches,
 )
@@ -1052,6 +1053,124 @@ async def test_structured_replacements_reject_invalid_batches_without_mutation(
     assert error in result.error
     assert (worktree / "app.txt").read_bytes() == before.encode("utf-8")
     assert not (worktree / "new.txt").exists()
+    persisted = await store.get(artifact_id)
+    assert persisted is not None
+    assert persisted.revision == 0
+    assert persisted.changed_paths == []
+
+
+async def _two_file_artifact(
+    tmp_path: Path,
+) -> tuple[Path, MemoryWorkProductStore, str, Path]:
+    root = await _repository(tmp_path)
+    (root / "main.go").write_text(
+        "func main() {\n\tif ok {\n\t\tstop()\n\t}\n\tif ok {\n\t\trun()\n\t}\n}\n",
+        encoding="utf-8",
+    )
+    (root / "dup.txt").write_text("same\nsame\n", encoding="utf-8")
+    await _git(root, "add", "main.go", "dup.txt")
+    await _git(root, "commit", "-m", "seed diagnostics")
+    store = MemoryWorkProductStore()
+    created = await create_worktree(
+        _context(root, store, {"summary": "edit diagnostics"})
+    )
+    artifact_id = created.output_json["artifact_id"]
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    return root, store, artifact_id, Path(artifact.worktree_path)
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_unmatched_replacements_name_every_failure_with_actual_lines(
+    tmp_path: Path,
+) -> None:
+    """A from-memory old_text gets the path, index, indentation, and real lines."""
+
+    root, store, artifact_id, worktree = await _two_file_artifact(tmp_path)
+
+    result = await edit_files(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "edits": [
+                    {
+                        "kind": "update",
+                        "path": "main.go",
+                        "expected_sha256": _sha(worktree / "main.go"),
+                        "replacements": [
+                            {
+                                "old_text": "func main() {",
+                                "new_text": "func main() { // ok",
+                            },
+                            {
+                                "old_text": "\t\t\trun()\n",
+                                "new_text": "\t\t\tgo run()\n",
+                            },
+                            {"old_text": "\t\tif ok {\n\t\t\trun()\n", "new_text": ""},
+                        ],
+                    },
+                    {
+                        "kind": "update",
+                        "path": "dup.txt",
+                        "expected_sha256": _sha(worktree / "dup.txt"),
+                        "replacements": [{"old_text": "same", "new_text": "other"}],
+                    },
+                ],
+            },
+        )
+    )
+
+    assert "main.go: replacement 1 old_text was not found." in result.error
+    assert "the file has 2 tabs, old_text has 3 tabs" in result.error
+    assert "6\t\t\trun()" in result.error
+    assert (
+        "replacement 2 old_text was not found. Indentation differs at line 5"
+        in result.error
+    )
+    assert "main.go: replacement 0" not in result.error
+    assert "dup.txt: replacement 0 old_text occurs 2 times (lines 1, 2)" in result.error
+    assert "No edits were applied" in result.error
+    assert (
+        (worktree / "main.go").read_text(encoding="utf-8").startswith("func main() {\n")
+    )
+
+
+@pytest.mark.asyncio
+async def test_preflight_rejects_unappliable_batches_without_effects(
+    tmp_path: Path,
+) -> None:
+    """Approval-time preflight validates the batch but never edits or claims."""
+
+    root, store, artifact_id, worktree = await _two_file_artifact(tmp_path)
+    digest = _sha(worktree / "main.go")
+
+    def batch(old_text: str) -> dict[str, object]:
+        return {
+            "artifact_id": artifact_id,
+            "edits": [
+                {
+                    "kind": "update",
+                    "path": "main.go",
+                    "expected_sha256": digest,
+                    "replacements": [
+                        {"old_text": old_text, "new_text": "\t\tgo run()\n"}
+                    ],
+                }
+            ],
+        }
+
+    rejected = await preflight_edit_files(_context(root, store, batch("\t\t\trun()\n")))
+    accepted = await preflight_edit_files(_context(root, store, batch("\t\trun()\n")))
+
+    assert rejected is not None and "main.go: replacement 0" in rejected.error
+    assert accepted is None
+    assert _sha(worktree / "main.go") == digest
     persisted = await store.get(artifact_id)
     assert persisted is not None
     assert persisted.revision == 0
