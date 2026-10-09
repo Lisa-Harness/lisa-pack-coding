@@ -1,0 +1,67 @@
+# Product review → feature design doc → multi-file implementation → commit.
+# Mirrors the live dnsmasq-web flow that stalled in coding_execute: the model
+# must understand an unfamiliar service, write a design, then land a change
+# that spans service, API, and lease logic. Judged by hidden acceptance tests
+# in acceptance/ that the model never sees.
+# Run: uv run lisa-e2e run <this file>   (from the lisa framework checkout)
+id: coding/feature-design-implement
+session_context: session_context.md
+fixture:
+  repo: fixtures/netpin
+packs:
+  - lisa-pack-bash
+  - lisa-pack-bwrap
+  - lisa-pack-coding
+  - lisa-pack-markdown
+  - lisa-pack-personas
+turns:
+  - >-
+    Review the project in the coding workspace so you understand the product:
+    what it does, how a request flows through the modules, and how it is
+    tested. Record what you learn in memory so it is available in later
+    sessions.
+  - >-
+    Next feature, "Trust the pin". (1) POST /reservations may omit "ip": then
+    pin the MAC's active lease — use the lease's ip, and its hostname unless
+    the body gives one. If the MAC has no active lease, respond 422
+    {"error": "no_active_lease"}. (2) POST and PUT must respond 409
+    {"error": "ip_conflict", "conflicting_mac": "<mac>"} when the ip is
+    already reserved for a different MAC, or is held by a different MAC's
+    active lease. A lease is active when its expiry is 0 or in the future;
+    expired leases never conflict, and re-saving a MAC with its own ip is
+    fine. Nothing is stored or published on a conflict. Everything else keeps
+    working as today. Write a design and implementation plan for this and
+    save it as a document.
+  - >-
+    Get started: implement the plan in an isolated worktree, add tests, run
+    the required checks, and commit it.
+approvals:
+  approve: ["*"]
+  deny: [coding_push, coding_cleanup_worktree]
+budgets:
+  max_messages: 20
+  max_continues: 0
+  max_yield_replies: 0
+  wall_clock_s: 2700
+oracles:
+  hygiene:
+    - not_aborted: {}
+    - no_turn_errors: {}
+    - no_operator_exit: {}
+    - no_unanswered_yield: {}
+    - no_runtime_errors: {}
+  review:
+    - receipt: {capability: [coding_read_file, coding_search_code, coding_outline_source]}
+    - memory_recorded: {mentions_any: ["netpin", "dhcp-host", "lease"]}
+  design:
+    - data_check: {argv: [grep, -rlq, --include=*.md, ip_conflict, .]}
+  implement:
+    - baseline_fails: {argv: [python3, "${SCENARIO_DIR}/acceptance/test_trust_the_pin.py"]}
+    - workproduct_committed: {}
+    - branch_prefix: {prefix: "lisa/"}
+    - main_untouched: {}
+    - diff_touches: {paths: [netpin/service.py]}
+    - checks_current: {}
+    - worktree_clean: {}
+    - independent_check: {argv: [python3, -m, unittest], restore: [tests]}
+    - independent_check: {argv: [python3, "${SCENARIO_DIR}/acceptance/test_trust_the_pin.py"]}
