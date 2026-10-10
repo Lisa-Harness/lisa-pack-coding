@@ -68,9 +68,12 @@ design) or `coding_execute` (implement it) via `yield` or `delegate`.
 ## Convergence is mandatory
 
 Design exists to produce a durable artifact, not to enumerate possibilities.
-Once you have grounded understanding of the subsystem — typically after a
-small number of focused reads — STOP reading and write the design with
-`markdown_forge_document`. The document must include:
+Once you have grounded understanding of the subsystem —
+typically after a small number of focused reads —
+stop reading,
+capture it with `okf_emit_concept`,
+and write the design with `markdown_forge_document`.
+The document must include:
 
 - A short statement of the problem and the constraints it must satisfy.
 - The concrete design: modules/classes/functions touched, data shapes,

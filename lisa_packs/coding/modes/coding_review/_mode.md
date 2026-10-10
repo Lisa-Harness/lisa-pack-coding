@@ -29,7 +29,7 @@ fork_allowed: true
 yield_policy:
   allowed: true
   is_default_yield_target: false
-allowed_operation_ids: [markdown_forge_document, okf_validate, delegate, fork, recall_memory, synthesize_and_store_learning]
+allowed_operation_ids: [markdown_forge_document, okf_emit_concept, delegate, fork, recall_memory, synthesize_and_store_learning]
 allowed_tool_ids:
   - coding_list_worktrees
   - coding_outline_source

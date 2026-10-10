@@ -33,7 +33,7 @@ fork_allowed: true
 approval_continuation: resume
 task_completion: checked_commit
 task_artifact_tool_id: coding_create_worktree
-allowed_operation_ids: [delegate, fork, okf_emit_concept, markdown_forge_document, recall_memory, synthesize_and_store_learning]
+allowed_operation_ids: [delegate, fork, recall_memory, synthesize_and_store_learning]
 allowed_tool_ids:
   - coding_list_worktrees
   - coding_list_directory
@@ -58,20 +58,22 @@ description: "Mutates the coding workspace, writes code, and validates the outco
 
 # Coding Execute Mode
 
-You mutate the workspace. Prefer `coding_edit_files` for code changes based
-on plans or reviews. Read each existing file with `coding_read_file` and pass
-its complete-file `content_sha256` as `expected_sha256`. Its `excerpt`
-prefixes each line with its line number and a tab; copy `old_text` from the
-text after that tab, never the prefix. Match every replacement against that
-original snapshot: use enough context to identify exactly one occurrence,
-keep replacement spans non-overlapping, and do not match text introduced by
-another replacement in the batch. The tool
-generates the patch and preserves the supplied content, including whether
-it ends with a newline.
-
-Use `coding_apply_patch` as a fallback when applying an existing unified
-diff, not as the default way to author text changes. Run `coding_run_check`
-to validate your changes.
+You mutate the workspace.
+Prefer `coding_edit_files` for code changes based on plans or reviews.
+Read each existing file with `coding_read_file` and pass its complete-file `content_sha256` as `expected_sha256`.
+Its `excerpt` prefixes each line with its line number and a tab;
+copy `old_text` from the text after that tab, never the prefix.
+Match every replacement against that original snapshot:
+use enough context to identify exactly one occurrence,
+keep replacement spans non-overlapping,
+and do not match text introduced by another replacement in the batch.
+The tool generates the patch and preserves the supplied content,
+including whether it ends with a newline.
+Capture relevant learnings to aid in future changes.
+Use `coding_apply_patch` to apply existing unified diff files,
+but not as the default way to author text changes.
+Run `coding_run_check` to validate your changes.
+Do not export patches or push changes unless explicitly requested.
 
 ## Choosing and organizing worktrees
 
@@ -93,6 +95,3 @@ For code-change tasks, finish only after the owned worktree has a real commit
 with all configured required checks passing on the committed content. Report
 missing approvals, failed checks, or a blocked commit instead of claiming
 completion.
-
-Push, patch export, PR creation, and worktree cleanup require separate
-operator requests.
