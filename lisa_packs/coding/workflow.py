@@ -89,6 +89,20 @@ async def _drain_limited(
     return bytes(retained), overflowed
 
 
+async def _feed_and_wait(
+    process: asyncio.subprocess.Process, stdin_bytes: bytes | None
+) -> int:
+    if stdin_bytes is not None:
+        assert process.stdin is not None
+        try:
+            process.stdin.write(stdin_bytes)
+            await process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # The child exited without reading; its exit status reports why.
+        process.stdin.close()
+    return await process.wait()
+
+
 async def run_process(
     argv: Sequence[str],
     *,
@@ -102,10 +116,12 @@ async def run_process(
 
     if not argv or not argv[0]:
         raise CodingWorkflowError("A non-empty executable argument vector is required.")
+    # Never inherit the host's stdin: an interactive host's TTY must not be
+    # shared with children.
     process = await asyncio.create_subprocess_exec(
         *argv,
         cwd=str(cwd),
-        stdin=asyncio.subprocess.PIPE if stdin_text is not None else None,
+        stdin=asyncio.subprocess.PIPE if stdin_text is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
@@ -114,18 +130,21 @@ async def run_process(
     assert process.stderr is not None
     stdout_task = asyncio.create_task(_drain_limited(process.stdout, limit=max_output_bytes))
     stderr_task = asyncio.create_task(_drain_limited(process.stderr, limit=max_output_bytes))
-    if stdin_text is not None:
-        assert process.stdin is not None
-        process.stdin.write(stdin_text.encode("utf-8"))
-        await process.stdin.drain()
-        process.stdin.close()
+    stdin_bytes = stdin_text.encode("utf-8") if stdin_text is not None else None
     timed_out = False
     try:
-        await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
+        await asyncio.wait_for(_feed_and_wait(process, stdin_bytes), timeout=timeout_seconds)
     except TimeoutError:
         timed_out = True
         process.kill()
         await process.wait()
+    except BaseException:
+        # Cancelled (e.g. the caller's tool deadline): never orphan the child.
+        if process.returncode is None:
+            process.kill()
+        stdout_task.cancel()
+        stderr_task.cancel()
+        raise
     stdout, stdout_overflowed = await stdout_task
     stderr, stderr_overflowed = await stderr_task
     return ProcessResult(
