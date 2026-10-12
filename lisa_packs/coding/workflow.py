@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
+import signal
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -15,7 +17,11 @@ from typing import Literal, cast
 from kernel.models import ToolExecutionContext
 from sdk.workproducts import WorkProduct, WorkProductStore
 
-from lisa_packs.coding.config import CodingCheck, CodingPackConfig, CodingPreparationRecipe
+from lisa_packs.coding.config import (
+    CodingCheck,
+    CodingPackConfig,
+    CodingPreparationRecipe,
+)
 from lisa_packs.coding.local_files import CodingPathError, resolve_relative_path
 
 __all__ = [
@@ -28,6 +34,8 @@ __all__ = [
     "artifact_worktree",
     "candidate_tree_sha",
     "changed_paths",
+    "dependency_manifest_digest",
+    "expand_check_argv",
     "load_owned_artifact",
     "patch_paths",
     "preparation_is_current",
@@ -37,8 +45,6 @@ __all__ = [
     "run_contained",
     "run_git",
     "run_process",
-    "dependency_manifest_digest",
-    "expand_check_argv",
     "tree_changes",
     "workspace_python",
     "worktree_tree_sha",
@@ -71,13 +77,60 @@ class ReadableRoot:
     artifact_id: str | None = None
 
 
+async def _bounded_drain(
+    task: asyncio.Future[tuple[bytes, bool]],
+    retained: list[bytes],
+) -> tuple[bytes, bool]:
+    """Await one drain task with a final grace bound.
+
+    A normally-exiting child whose orphaned descendant still holds the pipe
+    write end would otherwise block on the stream EOF forever (the 2026-10-12
+    ``setsid`` daemon wedge: the dnsmasq-web ``RunDaemon`` helper holds the
+    test run's inherited pipes and the check tool waited 47 minutes with no
+    timeout able to fire). Past the grace bound the drain is cancelled and
+    ``retained`` carries whatever byte holder the drain task kept.
+    """
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=5)
+    except (TimeoutError, asyncio.CancelledError):
+        if task.cancelled():
+            return b"", False
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+        holder = retained[0] if retained and isinstance(retained[0], bytes) else b""
+        return holder, False
+
+
+def _kill_group(process: asyncio.subprocess.Process) -> None:
+    """Deliver SIGKILL to the child's whole process group, or the child.
+
+    Killing only the direct child leaves orphans holding the inherited
+    stdout/stderr write ends, so the drains block until the last holder
+    exits — forever for a ``setsid`` daemon. The child is started in its own
+    session (``start_new_session``), so the group kill covers descendants.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+        return
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    with contextlib.suppress(ProcessLookupError):
+        process.kill()
+
+
 async def _drain_limited(
     stream: asyncio.StreamReader,
     *,
     limit: int,
+    retained_holder: list[bytes] | None = None,
 ) -> tuple[bytes, bool]:
-    """Drain a subprocess stream while retaining no more than ``limit`` bytes."""
+    """Drain a subprocess stream while retaining no more than ``limit`` bytes.
 
+    ``retained_holder`` (one-entry list, when provided) is kept current with
+    the bytes retained so far, so a caller that must abandon the drain under
+    the final grace bound can still salvage what already arrived.
+    """
     retained = bytearray()
     overflowed = False
     while chunk := await stream.read(8192):
@@ -86,6 +139,9 @@ async def _drain_limited(
             retained.extend(chunk[:remaining])
         if len(chunk) > remaining:
             overflowed = True
+        if retained_holder is not None:
+            retained_holder.clear()
+            retained_holder.append(bytes(retained))
     return bytes(retained), overflowed
 
 
@@ -121,32 +177,60 @@ async def run_process(
     process = await asyncio.create_subprocess_exec(
         *argv,
         cwd=str(cwd),
-        stdin=asyncio.subprocess.PIPE if stdin_text is not None else asyncio.subprocess.DEVNULL,
+        stdin=asyncio.subprocess.PIPE
+        if stdin_text is not None
+        else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        # Own session + process group: the group kill takes the whole child
+        # tree (grandchildren holding the output pipes must not outlive the
+        # deadline or hold the drains open after the kill).
+        start_new_session=True,
     )
     assert process.stdout is not None
     assert process.stderr is not None
-    stdout_task = asyncio.create_task(_drain_limited(process.stdout, limit=max_output_bytes))
-    stderr_task = asyncio.create_task(_drain_limited(process.stderr, limit=max_output_bytes))
+    stdout_holder: list[bytes] = []
+    stderr_holder: list[bytes] = []
+    stdout_task = asyncio.create_task(
+        _drain_limited(
+            process.stdout, limit=max_output_bytes, retained_holder=stdout_holder
+        )
+    )
+    stderr_task = asyncio.create_task(
+        _drain_limited(
+            process.stderr, limit=max_output_bytes, retained_holder=stderr_holder
+        )
+    )
     stdin_bytes = stdin_text.encode("utf-8") if stdin_text is not None else None
     timed_out = False
     try:
-        await asyncio.wait_for(_feed_and_wait(process, stdin_bytes), timeout=timeout_seconds)
+        await asyncio.wait_for(
+            _feed_and_wait(process, stdin_bytes), timeout=timeout_seconds
+        )
     except TimeoutError:
         timed_out = True
-        process.kill()
+        _kill_group(process)
         await process.wait()
+        # The group is gone, so the pipes close. The drains finish on EOF;
+        # bounded one more time so no pipe quirk can wedge the caller past
+        # its deadline.
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                asyncio.gather(stdout_task, stderr_task, return_exceptions=True),
+                timeout=5,
+            )
     except BaseException:
         # Cancelled (e.g. the caller's tool deadline): never orphan the child.
         if process.returncode is None:
-            process.kill()
+            _kill_group(process)
         stdout_task.cancel()
         stderr_task.cancel()
+        with contextlib.suppress(BaseException):
+            await process.wait()
         raise
-    stdout, stdout_overflowed = await stdout_task
-    stderr, stderr_overflowed = await stderr_task
+    stdout, stdout_overflowed = await _bounded_drain(stdout_task, stdout_holder)
+    stderr, stderr_overflowed = await _bounded_drain(stderr_task, stderr_holder)
     return ProcessResult(
         return_code=process.returncode or 0,
         stdout=stdout.decode("utf-8", errors="replace"),
@@ -188,7 +272,9 @@ async def run_contained(
     )
     nearest = max(matching_paths, key=lambda entry: len(entry[0].parts), default=None)
     if nearest is None or nearest[1] != "rw":
-        raise CodingWorkflowError("bwrap sandbox floor does not permit worktree writes.")
+        raise CodingWorkflowError(
+            "bwrap sandbox floor does not permit worktree writes."
+        )
     tool_result = await dispatch(
         "bwrap_run",
         {
@@ -213,7 +299,9 @@ async def run_contained(
         or str(worktree) not in payload["writable_paths"]
         or type(payload.get("return_code")) is not int
     ):
-        raise CodingWorkflowError("bwrap sandbox did not verify the writable worktree check.")
+        raise CodingWorkflowError(
+            "bwrap sandbox did not verify the writable worktree check."
+        )
     return ProcessResult(
         return_code=int(payload["return_code"]),
         stdout=tool_result.output_text or "",
@@ -226,7 +314,9 @@ async def run_contained(
 def workspace_python(worktree: Path) -> Path:
     """Return the platform-specific interpreter owned by the worktree venv."""
 
-    return worktree / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    return (
+        worktree / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    )
 
 
 def expand_check_argv(check: CodingCheck, *, worktree: Path) -> tuple[str, ...]:
@@ -241,7 +331,9 @@ def expand_check_argv(check: CodingCheck, *, worktree: Path) -> tuple[str, ...]:
 def preparation_recipe_digest(recipe: CodingPreparationRecipe) -> str:
     """Hash the exact finite recipe selected by session policy."""
 
-    payload = json.dumps(recipe.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(
+        recipe.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -283,7 +375,8 @@ def preparation_is_current(
             preparation.recipe_digest == preparation_recipe_digest(recipe)
             and preparation.dependency_manifest_digest
             == dependency_manifest_digest(worktree, config=config)
-            and Path(preparation.python_path).absolute() == workspace_python(worktree).absolute()
+            and Path(preparation.python_path).absolute()
+            == workspace_python(worktree).absolute()
             and workspace_python(worktree).is_file()
         )
     except (OSError, ValueError, CodingWorkflowError):
@@ -324,7 +417,9 @@ async def candidate_tree_sha(
     """
     add_paths = list(paths) if paths else ["."]
     return await _hash_tree(
-        worktree, config=config, adds=(("--literal-pathspecs", "add", "-A", "--", *add_paths),)
+        worktree,
+        config=config,
+        adds=(("--literal-pathspecs", "add", "-A", "--", *add_paths),),
     )
 
 
@@ -369,13 +464,19 @@ async def tree_changes(
         config=config,
     )
     if result.return_code != 0:
-        raise CodingWorkflowError(result.stderr.strip() or "Cannot diff candidate Git trees.")
+        raise CodingWorkflowError(
+            result.stderr.strip() or "Cannot diff candidate Git trees."
+        )
     fields = result.stdout.split("\0")
     return list(zip(fields[0::2], fields[1::2], strict=False))
 
 
 async def restore_tree_paths(
-    worktree: Path, *, config: CodingPackConfig, tree: str, changes: Sequence[tuple[str, str]]
+    worktree: Path,
+    *,
+    config: CodingPackConfig,
+    tree: str,
+    changes: Sequence[tuple[str, str]],
 ) -> None:
     """Put each changed path back to its content in ``tree``."""
 
@@ -383,11 +484,20 @@ async def restore_tree_paths(
     if existing:
         restored = await run_git(
             worktree,
-            ("--literal-pathspecs", "restore", f"--source={tree}", "--worktree", "--", *existing),
+            (
+                "--literal-pathspecs",
+                "restore",
+                f"--source={tree}",
+                "--worktree",
+                "--",
+                *existing,
+            ),
             config=config,
         )
         if restored.return_code != 0:
-            raise CodingWorkflowError(restored.stderr.strip() or "Cannot restore changed files.")
+            raise CodingWorkflowError(
+                restored.stderr.strip() or "Cannot restore changed files."
+            )
     for status, path in changes:
         if status == "A":
             (worktree / path).unlink(missing_ok=True)
@@ -408,7 +518,9 @@ def artifact_worktree(artifact: WorkProduct, *, config: CodingPackConfig) -> Pat
 
     source_root = config.resolve_workspace_root()
     if Path(artifact.source_root).resolve() != source_root:
-        raise CodingWorkflowError("Artifact source root does not match the configured workspace.")
+        raise CodingWorkflowError(
+            "Artifact source root does not match the configured workspace."
+        )
     if not artifact.worktree_path:
         raise CodingWorkflowError("Artifact has no owned worktree.")
     worktree = Path(artifact.worktree_path).resolve()
@@ -417,9 +529,13 @@ def artifact_worktree(artifact: WorkProduct, *, config: CodingPackConfig) -> Pat
     except ValueError:
         pass
     else:
-        raise CodingWorkflowError("Artifact worktree must live outside the source workspace.")
+        raise CodingWorkflowError(
+            "Artifact worktree must live outside the source workspace."
+        )
     if not worktree.is_dir() or not (worktree / ".git").exists():
-        raise CodingWorkflowError("Artifact worktree is not available as a Git worktree.")
+        raise CodingWorkflowError(
+            "Artifact worktree is not available as a Git worktree."
+        )
     return worktree
 
 
@@ -445,7 +561,9 @@ async def load_owned_artifact(
     if artifact is None:
         raise CodingWorkflowError(f"Unknown code change artifact '{artifact_id}'.")
     if not artifact_owner_matches(artifact, ctx):
-        raise CodingWorkflowError("Artifact does not belong to this workspace, user, or session.")
+        raise CodingWorkflowError(
+            "Artifact does not belong to this workspace, user, or session."
+        )
     if require_worktree:
         artifact_worktree(artifact, config=config)
     if claim:
@@ -465,8 +583,12 @@ async def readable_root(
     source_root = config.resolve_workspace_root()
     if artifact_id is not None:
         if scope == "source":
-            raise CodingWorkflowError("artifact_id cannot be combined with source scope.")
-        artifact = await load_owned_artifact(ctx, artifact_id=artifact_id, config=config)
+            raise CodingWorkflowError(
+                "artifact_id cannot be combined with source scope."
+            )
+        artifact = await load_owned_artifact(
+            ctx, artifact_id=artifact_id, config=config
+        )
         return ReadableRoot(
             path=artifact_worktree(artifact, config=config),
             scope="worktree",
@@ -556,7 +678,9 @@ def patch_paths(patch: str, *, config: CodingPackConfig) -> list[str]:
         if raw not in paths:
             paths.append(raw)
     if not paths:
-        raise CodingWorkflowError("Patch must contain at least one unified diff file path.")
+        raise CodingWorkflowError(
+            "Patch must contain at least one unified diff file path."
+        )
     return paths
 
 
