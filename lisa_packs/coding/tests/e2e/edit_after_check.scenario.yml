@@ -1,0 +1,37 @@
+# Deterministic, token-free repro of the live coding_edit_files stall: the
+# model reads a file, edits it with a stale digest (rejected), rereads, and
+# edits it again. Live, both preflights of the approved edit hit the 30s tool
+# timeout. The model is model/edit_after_check.py, not an LLM.
+# Run: uv run --frozen lisa-e2e run <this file>   (from the lisa framework checkout)
+id: coding/edit-after-check-scripted
+session_context: session_context.md
+fixture:
+  repo: fixtures/stats
+policy: policy_allow_coding.yaml
+model:
+  script: model/edit_after_check.py
+packs:
+  - lisa-pack-bash
+  - lisa-pack-bwrap
+  - lisa-pack-coding
+  - lisa-pack-markdown
+  - lisa-pack-personas
+turns:
+  - Fix the off-by-one in stats.mean in an isolated worktree and run the required checks.
+approvals:
+  approve: ["*"]
+  deny: [coding_push, coding_cleanup_worktree]
+budgets:
+  max_messages: 4
+  max_continues: 0
+  max_yield_replies: 0
+  wall_clock_s: 300
+oracles:
+  hygiene:
+    - not_aborted: {}
+    - no_turn_errors: {}
+    - no_runtime_errors: {}
+  edit:
+    - receipt: {capability: coding_edit_files}
+    - diff_touches: {paths: [stats.py]}
+    - checks_current: {}

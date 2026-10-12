@@ -1,0 +1,25 @@
+# Mirrors the operator policy the live edit stall ran under: coding tools auto-allowed.
+# mode: ask|trust|plan   sandbox_downgrade: auto-approve sandboxed commands
+# bare_requires_approval: prompt for execute actions that are NOT sandboxed
+#   (containment none/degraded/unknown) even under trust mode.
+# Rules: allow/ask/deny lists, evaluated deny -> ask -> allow, first match.
+# Matchers: tool, effect (read|write|execute|external_write), pack,
+#   command_prefix, when (CEL expression; see docs/POLICY_GUIDE.md).
+version: 1
+mode: ask
+sandbox_downgrade: true
+bare_requires_approval: false
+allow:
+  # All coding-pack tools regardless of effect — the pack's own protected-
+  # branch/checks config is the containment, not the policy ladder.
+  - pack: lisa-pack-coding
+  # Routine reads (storage/thread) never need a prompt in a DM surface.
+  - effect: read
+  # Write-effect coding tools in any mode under this workspace.
+  - effect: write
+    pack: lisa-pack-coding
+ask:
+  # Still confirm anything unsandboxed shell-executing outside the pack.
+  - effect: execute
+    when: containment != "contained"
+deny: []
