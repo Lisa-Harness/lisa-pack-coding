@@ -43,7 +43,7 @@ owned worktree, never the source checkout.
 
 | Tool | Effect | Approval | Role |
 | --- | --- | --- | --- |
-| `coding_create_worktree` | write | ✓ | Mint a task-bound artifact + `git worktree add` an isolated branch at the source `HEAD` (or at `import_commit`'s parent when given). Pass `name` (e.g. `auth-refactor`) for the branch `<prefix><name>` and worktree `<source-parent>/.lisa-worktrees/<name>`; without one a short random id is used. Name clashes and protected slugs fail fast. Worktree lives **outside** the source tree, enforced. |
+| `coding_create_worktree` | write | ✓ | Mint a task-bound artifact + `git worktree add` an isolated branch at the source `HEAD` (or at `import_commit`'s parent when given). Pass `name` (e.g. `auth-refactor`) for the branch `<prefix><name>` and worktree `<worktree-dir>/<name>`; without one a short random id is used. Name clashes and protected slugs fail fast. Worktree lives **outside** the source tree, enforced. |
 | `coding_list_worktrees` | read | — | List the session's owned worktrees for this workspace (branch, path, `artifact_id`, status, revision, summary) so the model can name, find, and reuse them. |
 | `coding_edit_files` | write | ✓ | Preferred editor: apply exact, hash-guarded replacements, creates, or deletes as one revision. Replacements match the original snapshot and must not overlap. The tool generates and prevalidates the Git patch, preserving supplied content and EOF newlines. |
 | `coding_apply_patch` | write | ✓ | Fallback for existing unified diffs: prevalidate (`git apply --check`) and apply a bounded patch. Bumps `revision`, records `changed_paths`, **clears `checks`** (stale results are invalidated). |
@@ -122,7 +122,7 @@ replayed content like any fresh change (e.g. one PR per already-merged commit).
 
 `coding_create_worktree` accepts an optional model-chosen `name` that becomes
 the branch (`<prefix><name>`, e.g. `lisa/auth-refactor`) and the worktree
-directory (`.lisa-worktrees/<name>`), so related work can be found, reused,
+directory (`<worktree-dir>/<name>`), so related work can be found, reused,
 and organized into cleanly-mergeable change sets. `coding_list_worktrees`
 lists owned worktrees (branch, status, summary, `artifact_id`) so a session
 can pick one back up instead of minting a new worktree per turn.
@@ -200,7 +200,10 @@ strict `require_git=True`), `checks` (tuple of `{id, argv, timeout_seconds, kind
 where `kind` is `verify` (default) or `fix`),
 `required_check_ids`, `branch_prefix` (`lisa/`), `protected_branches`
 (`main`,`master`), `push_remote` (`origin`), `patch_export_dir` (empty →
-`<source-parent>/.lisa-patches`; must be absolute and outside the source), and the byte/line/result bounds
+`<source-parent>/.lisa-patches`; must be absolute and outside the source),
+`worktree_dir` (empty → `<data-dir>/git-worktrees/<workspace-name>` from the
+host-injected data dir; must be absolute; the resolved worktree directory must
+stay outside the source), and the byte/line/result bounds
 (`max_file_bytes` 512 000, `max_read_lines` 400, `max_patch_bytes` 200 000,
 `max_command_output_bytes` 100 000, `git_timeout_seconds` 60, …).
 
@@ -292,7 +295,9 @@ resources:
             persistence: direct-write
             network: deny
             paths:
-              /home/you/Code/.lisa-worktrees: rw
+              # Worktree parent (default <data-dir>/git-worktrees/<workspace-name>
+              # unless worktree_dir is set) — grant rw so checks can write there.
+              /home/you/.lisa/git-worktrees/my-project: rw
 routing:
   # Optional: route natural-language shell intent elsewhere; this pack is
   # tool-only and has no start_mode.

@@ -103,17 +103,21 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             raise CodingWorkflowError(
                 "Configured feature branch conflicts with a protected branch."
             )
-        worktree_parent = source_root.parent / ".lisa-worktrees"
+        worktree_parent = config.resolve_worktree_parent(
+            data_dir=ctx.data_dir, source_root=source_root
+        ).resolve()
+        # The worktree must never land inside the source tree: the source
+        # checkout stays untouched and the artifact owns one tree only.
+        if worktree_parent.is_relative_to(source_root):
+            raise CodingWorkflowError(
+                "Resolved worktree directory must be outside the source workspace."
+            )
         # Unnamed worktrees keep the artifact-id directory (historical layout);
         # named worktrees use the slug so the tree is self-describing.
         worktree_path = (
             worktree_parent / (slug if named else artifact.artifact_id)
         ).resolve()
-        try:
-            worktree_path.relative_to(source_root)
-        except ValueError:
-            pass
-        else:
+        if worktree_path.is_relative_to(source_root):
             raise CodingWorkflowError(
                 "Derived worktree path must be outside the source workspace."
             )

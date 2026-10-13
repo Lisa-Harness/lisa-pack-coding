@@ -136,6 +136,7 @@ def _context(
         ),
         delegated_tool_dispatch=dispatch,
         code_change_artifact_store=store,
+        data_dir=str(root.parent / "data"),
         pack_config={
             "workspace_root": str(root),
             "checks": checks if checks is not None else [
@@ -170,7 +171,7 @@ async def test_create_worktree_uses_model_chosen_name_and_lists_owned(tmp_path: 
     assert created.output_json["branch"] == "lisa/auth-refactor"
     worktree_path = Path(created.output_json["worktree_path"])
     assert worktree_path.name == "auth-refactor"
-    assert worktree_path.parent == root.parent / ".lisa-worktrees"
+    assert worktree_path.parent == tmp_path / "data" / "git-worktrees" / root.name
     artifact = await store.get(created.output_json["artifact_id"])
     assert artifact is not None
     assert artifact.branch == "lisa/auth-refactor"
@@ -1685,3 +1686,60 @@ async def test_live_bwrap_check_certifies_only_the_owned_worktree(tmp_path: Path
     )
     assert committed.result.error == "", committed.result.error
     assert (repo.root / "app.txt").read_text(encoding="utf-8") == "hello\n"
+
+
+@pytest.mark.asyncio
+async def test_create_worktree_defaults_under_data_dir_and_rejects_missing_data_dir(
+    tmp_path: Path,
+) -> None:
+    """Default worktrees go to <data-dir>/git-worktrees/<workspace-name>; no data_dir fails."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+
+    created = await create_worktree(_context(root, store, {}))
+
+    assert created.error == ""
+    worktree_path = Path(created.output_json["worktree_path"])
+    assert worktree_path.parent == tmp_path / "data" / "git-worktrees" / root.name
+    cleaned = await cleanup_worktree(
+        _context(root, store, {"artifact_id": created.output_json["artifact_id"]})
+    )
+    assert cleaned.error == ""
+
+    ctx = _context(root, store, {})
+    ctx.data_dir = ""
+    missing = await create_worktree(ctx)
+
+    assert "data_dir" in missing.error
+
+
+@pytest.mark.asyncio
+async def test_create_worktree_honors_configured_worktree_dir(tmp_path: Path) -> None:
+    """An explicit absolute worktree_dir overrides the data-dir default."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    ctx = _context(root, store, {"name": "custom-dir"})
+    ctx.pack_config["worktree_dir"] = str(tmp_path / "trees")
+
+    created = await create_worktree(ctx)
+
+    assert created.error == "", created.error
+    worktree_path = Path(created.output_json["worktree_path"])
+    assert worktree_path.parent == tmp_path / "trees"
+    assert worktree_path.name == "custom-dir"
+
+
+@pytest.mark.asyncio
+async def test_create_worktree_rejects_worktree_dir_inside_source(tmp_path: Path) -> None:
+    """A configured worktree_dir inside the workspace is refused before git runs."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    ctx = _context(root, store, {})
+    ctx.pack_config["worktree_dir"] = str(root / "trees")
+
+    created = await create_worktree(ctx)
+
+    assert "outside the source workspace" in created.error

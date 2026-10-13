@@ -77,6 +77,9 @@ class CodingPackConfig(BaseModel):
     push_remote: str = Field(default="origin", min_length=1, max_length=100)
     #: Absolute parent for exported patch series; empty means ``<source-parent>/.lisa-patches``.
     patch_export_dir: str = ""
+    #: Absolute parent under which owned worktrees are created; empty means
+    #: ``<data-dir>/git-worktrees/<workspace-name>`` from the host-injected data dir.
+    worktree_dir: str = ""
 
     @model_validator(mode="after")
     def _validate_checks(self) -> CodingPackConfig:
@@ -109,7 +112,30 @@ class CodingPackConfig(BaseModel):
                 )
         if any(branch in self.protected_branches for branch in ("", self.branch_prefix)):
             raise ValueError("branch_prefix must not be an empty or protected branch")
+        if self.worktree_dir and not Path(self.worktree_dir).is_absolute():
+            raise ValueError("worktree_dir must be an absolute path")
         return self
+
+    def resolve_worktree_parent(self, *, data_dir: str, source_root: Path) -> Path:
+        """Resolve the parent directory under which owned worktrees are created.
+
+        An explicit ``worktree_dir`` wins; otherwise the default lives inside
+        the host data dir at ``git-worktrees/<workspace-name>``, named after
+        the source checkout so several repositories share one data root. The
+        host always injects a resolved ``data_dir``; without one (a pack-only
+        context) creation fails fast rather than scattering worktrees in an
+        unpredictable location.
+        """
+
+        if self.worktree_dir:
+            return Path(self.worktree_dir).expanduser()
+        root = (data_dir or "").strip()
+        if not root:
+            raise ValueError(
+                "worktree_dir is not configured and the host injected no data_dir; "
+                "set worktree_dir to an absolute path."
+            )
+        return Path(root) / "git-worktrees" / source_root.name
 
     def preparation_recipe(self, recipe_id: str | None) -> CodingPreparationRecipe:
         """Return an explicitly or uniquely selected finite preparation recipe."""
