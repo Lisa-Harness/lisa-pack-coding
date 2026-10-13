@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
+import signal
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -15,7 +17,11 @@ from typing import Literal, cast
 from kernel.models import ToolExecutionContext
 from sdk.workproducts import WorkProduct, WorkProductStore
 
-from lisa_packs.coding.config import CodingCheck, CodingPackConfig, CodingPreparationRecipe
+from lisa_packs.coding.config import (
+    CodingCheck,
+    CodingPackConfig,
+    CodingPreparationRecipe,
+)
 from lisa_packs.coding.local_files import CodingPathError, resolve_relative_path
 
 __all__ = [
@@ -28,6 +34,8 @@ __all__ = [
     "artifact_worktree",
     "candidate_tree_sha",
     "changed_paths",
+    "dependency_manifest_digest",
+    "expand_check_argv",
     "load_owned_artifact",
     "patch_paths",
     "preparation_is_current",
@@ -37,14 +45,17 @@ __all__ = [
     "run_contained",
     "run_git",
     "run_process",
-    "dependency_manifest_digest",
-    "expand_check_argv",
     "tree_changes",
     "workspace_python",
     "worktree_tree_sha",
 ]
 
 _GIT_STATUS_PATH_OFFSET = 3
+# Upper bound on reaping and draining once a process group has been killed.
+_KILL_GRACE_SECONDS = 5.0
+# Git must never wait on a human, and read-only commands such as ``status``
+# must not take the index lock away from the user's own Git or editor.
+_GIT_BACKGROUND_ENV = {"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
 
 
 class CodingWorkflowError(RuntimeError):
@@ -71,22 +82,24 @@ class ReadableRoot:
     artifact_id: str | None = None
 
 
-async def _drain_limited(
-    stream: asyncio.StreamReader,
-    *,
-    limit: int,
-) -> tuple[bytes, bool]:
-    """Drain a subprocess stream while retaining no more than ``limit`` bytes."""
+class _Capture:
+    """Bytes drained from one stream, kept even if the drain is cancelled."""
 
-    retained = bytearray()
-    overflowed = False
-    while chunk := await stream.read(8192):
-        remaining = limit - len(retained)
-        if remaining > 0:
-            retained.extend(chunk[:remaining])
-        if len(chunk) > remaining:
-            overflowed = True
-    return bytes(retained), overflowed
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.data = bytearray()
+        self.overflowed = False
+
+    async def drain(self, stream: asyncio.StreamReader) -> None:
+        while chunk := await stream.read(65536):
+            room = self.limit - len(self.data)
+            if room > 0:
+                self.data += chunk[:room]
+            if len(chunk) > room:
+                self.overflowed = True
+
+    def text(self) -> str:
+        return self.data.decode("utf-8", errors="replace")
 
 
 async def _feed_and_wait(
@@ -103,6 +116,15 @@ async def _feed_and_wait(
     return await process.wait()
 
 
+def _kill_group(process: asyncio.subprocess.Process) -> None:
+    """SIGKILL the child's process group (the child is its leader)."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        if hasattr(os, "killpg"):
+            os.killpg(process.pid, signal.SIGKILL)
+        elif process.returncode is None:
+            process.kill()
+
+
 async def run_process(
     argv: Sequence[str],
     *,
@@ -112,7 +134,14 @@ async def run_process(
     stdin_text: str | None = None,
     env: Mapping[str, str] | None = None,
 ) -> ProcessResult:
-    """Execute an explicit argument vector without a shell or unbounded output."""
+    """Execute an explicit argument vector without a shell or unbounded output.
+
+    The child leads a new session: it has no controlling terminal, so nothing
+    can prompt on the host's TTY. When the child exits, times out, or the
+    caller is cancelled, its whole process group is killed, so leftover
+    descendants cannot hold the output pipes open. Every wait after that kill
+    is bounded, so a lost exit notification cannot hang the caller.
+    """
 
     if not argv or not argv[0]:
         raise CodingWorkflowError("A non-empty executable argument vector is required.")
@@ -125,34 +154,35 @@ async def run_process(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        start_new_session=True,
     )
     assert process.stdout is not None
     assert process.stderr is not None
-    stdout_task = asyncio.create_task(_drain_limited(process.stdout, limit=max_output_bytes))
-    stderr_task = asyncio.create_task(_drain_limited(process.stderr, limit=max_output_bytes))
+    stdout, stderr = _Capture(max_output_bytes), _Capture(max_output_bytes)
+    drains = asyncio.gather(stdout.drain(process.stdout), stderr.drain(process.stderr))
     stdin_bytes = stdin_text.encode("utf-8") if stdin_text is not None else None
     timed_out = False
     try:
-        await asyncio.wait_for(_feed_and_wait(process, stdin_bytes), timeout=timeout_seconds)
+        async with asyncio.timeout(timeout_seconds):
+            await _feed_and_wait(process, stdin_bytes)
     except TimeoutError:
         timed_out = True
-        process.kill()
-        await process.wait()
     except BaseException:
-        # Cancelled (e.g. the caller's tool deadline): never orphan the child.
-        if process.returncode is None:
-            process.kill()
-        stdout_task.cancel()
-        stderr_task.cancel()
+        _kill_group(process)
+        drains.cancel()
         raise
-    stdout, stdout_overflowed = await stdout_task
-    stderr, stderr_overflowed = await stderr_task
+    _kill_group(process)
+    with contextlib.suppress(TimeoutError):
+        async with asyncio.timeout(_KILL_GRACE_SECONDS):
+            await asyncio.gather(drains, process.wait())
+    drains.cancel()
+    returncode = process.returncode
     return ProcessResult(
-        return_code=process.returncode or 0,
-        stdout=stdout.decode("utf-8", errors="replace"),
-        stderr=stderr.decode("utf-8", errors="replace"),
+        return_code=returncode if returncode is not None else -signal.SIGKILL,
+        stdout=stdout.text(),
+        stderr=stderr.text(),
         timed_out=timed_out,
-        output_truncated=stdout_overflowed or stderr_overflowed,
+        output_truncated=stdout.overflowed or stderr.overflowed,
     )
 
 
@@ -306,7 +336,7 @@ async def run_git(
         timeout_seconds=config.git_timeout_seconds,
         max_output_bytes=config.max_command_output_bytes,
         stdin_text=stdin_text,
-        env=env,
+        env={**(os.environ if env is None else env), **_GIT_BACKGROUND_ENV},
     )
 
 
