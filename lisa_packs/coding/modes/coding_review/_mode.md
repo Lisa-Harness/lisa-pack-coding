@@ -39,6 +39,7 @@ allowed_tool_ids:
   - coding_find_files
   - coding_status
   - coding_read_copilot_customizations
+  - fetch_page
 description: "Read-only review of the coding workspace: analyzes code and produces review findings without touching the worktree."
 ---
 

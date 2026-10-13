@@ -39,6 +39,7 @@ allowed_tool_ids:
   - coding_find_files
   - coding_status
   - coding_read_copilot_customizations
+  - fetch_page
 description: "Design the shape of a code change before any worktree exists: reads the codebase, reasons about alternatives, and writes a durable design artifact."
 ---
 
