@@ -49,6 +49,7 @@ allowed_tool_ids:
   - coding_run_check
   - coding_status
   - coding_commit
+  - coding_history
   - coding_push
   - coding_export_patches
   - coding_record_fact

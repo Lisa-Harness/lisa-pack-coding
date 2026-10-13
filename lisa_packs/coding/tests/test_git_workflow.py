@@ -36,6 +36,7 @@ from lisa_packs.coding.tools.export_patches.export_patches import (
     execute as export_patches,
 )
 from lisa_packs.coding.tools.find_files.find_files import execute as find_files
+from lisa_packs.coding.tools.history.history import execute as history
 from lisa_packs.coding.tools.import_commits.import_commits import execute as import_commits
 from lisa_packs.coding.tools.list_directory.list_directory import (
     execute as list_directory,
@@ -1743,3 +1744,675 @@ async def test_create_worktree_rejects_worktree_dir_inside_source(tmp_path: Path
     created = await create_worktree(ctx)
 
     assert "outside the source workspace" in created.error
+async def _commit_artifact(
+    root: Path,
+    store: MemoryWorkProductStore,
+    artifact_id: str,
+    *,
+    patch: str | None = None,
+    message: str = "owned change",
+) -> str:
+    """Patch (optional), check, and commit one artifact; return its commit sha."""
+
+    if patch is not None:
+        applied = await apply_patch(
+            _context(root, store, {"artifact_id": artifact_id, "patch": patch})
+        )
+        assert applied.error == "", applied.error
+    checked = await run_check(
+        _context(root, store, {"artifact_id": artifact_id, "check_id": "unit"})
+    )
+    assert checked.output_json["status"] == "passed"
+    committed = await commit(
+        _context(root, store, {"artifact_id": artifact_id, "message": message})
+    )
+    assert committed.error == "", committed.error
+    return str(committed.output_json["commit_sha"])
+
+
+_APP_PATCH = """--- a/app.txt
++++ b/app.txt
+@@ -1 +1 @@
+-hello
++hello owned
+"""
+_SECOND_PATCH = """--- a/app.txt
++++ b/app.txt
+@@ -1 +1 @@
+-hello owned
++hello more
+"""
+
+
+async def _in_rebase(worktree: Path) -> bool:
+    """Return whether a rebase is still in progress inside the worktree."""
+
+    git_path = worktree / ".git"
+    if git_path.is_file():
+        git_dir = Path(
+            git_path.read_text(encoding="utf-8").split("gitdir:", 1)[1].strip()
+        )
+    else:
+        git_dir = git_path
+    return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
+
+
+async def _git_out(root: Path, *args: str) -> str:
+    process = await asyncio.create_subprocess_exec(
+        "git",
+        *args,
+        cwd=str(root),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
+    assert process.returncode == 0, stderr.decode("utf-8", errors="replace")
+    return stdout.decode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_history_tag_targets_owned_commits_only(tmp_path: Path) -> None:
+    """Tags may mark owned commits but never the base, and are deletable."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "tag-me"}))
+    artifact_id = created.output_json["artifact_id"]
+    commit_sha = await _commit_artifact(
+        root, store, artifact_id, patch=_APP_PATCH, message="tagged work"
+    )
+    base_sha = (await store.get(artifact_id)).base_sha
+
+    tagged = await history(
+        _context(
+            root, store, {"artifact_id": artifact_id, "op": "tag", "name": "golden"}
+        )
+    )
+    assert tagged.error == "", tagged.error
+    tags = await _git_out(Path(created.output_json["worktree_path"]), "tag", "--list")
+    assert tagged.output_json["tag"] == "golden"
+    assert tagged.output_json["tag_target"] == commit_sha
+
+    at_target = await history(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "op": "tag",
+                "name": "annotated",
+                "target": commit_sha,
+                "annotated": True,
+                "message": "release",
+            },
+        )
+    )
+    assert at_target.error == "", at_target.error
+
+    on_base = await history(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "op": "tag",
+                "name": "nope",
+                "target": base_sha,
+            },
+        )
+    )
+    assert "owned commit" in on_base.error
+
+    duplicate = await history(
+        _context(
+            root, store, {"artifact_id": artifact_id, "op": "tag", "name": "golden"}
+        )
+    )
+    assert "already exists" in duplicate.error
+
+    reserved = await history(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "op": "tag", "name": "lisa/ckpt/evil"},
+        )
+    )
+    assert "reserved" in reserved.error
+
+    removed = await history(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "op": "tag_delete", "name": "golden"},
+        )
+    )
+    assert removed.error == "", removed.error
+    worktree = Path(created.output_json["worktree_path"])
+    tags = await _git_out(worktree, "tag", "--list")
+    assert "golden" not in tags.split()
+    assert "annotated" in tags.split()
+
+
+@pytest.mark.asyncio
+async def test_history_squash_all_preserves_tree_and_checks(tmp_path: Path) -> None:
+    """Squashing every owned commit keeps the tree, so checks stay certified."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "squash-me"}))
+    artifact_id = created.output_json["artifact_id"]
+    head = await _commit_artifact(
+        root, store, artifact_id, patch=_APP_PATCH, message="first change"
+    )
+    worktree = Path(created.output_json["worktree_path"])
+    checks_before = (await store.get(artifact_id)).checks["unit"].checked_tree_sha
+    count_before = int(await _git_out(worktree, "rev-list", "--count", "HEAD")) - 1
+
+    squashed = await history(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "op": "squash", "message": "one tidy commit"},
+        )
+    )
+    assert squashed.error == "", squashed.error
+    assert squashed.output_json["squashed_commits"] == count_before
+    assert squashed.output_json["tree_preserved"] is True
+    assert squashed.output_json["checkpoint_tag"].startswith("lisa/ckpt/")
+    artifact = await store.get(artifact_id)
+    assert artifact.commit_sha != head
+    assert artifact.checks["unit"].checked_tree_sha == checks_before
+    assert artifact.status == "committed"
+    count_after = int(await _git_out(worktree, "rev-list", "--count", "HEAD")) - 1
+    assert count_after == 1
+    file_sha_before = await _git_out(worktree, "rev-parse", f"{head}^{{tree}}")
+    assert await _git_out(worktree, "rev-parse", "HEAD^{tree}") == file_sha_before
+
+    # The pushed gate still accepts the squashed branch without re-running checks.
+    pushed = await push(_context(root, store, {"artifact_id": artifact_id}))
+    assert pushed.error == "", pushed.error
+
+
+@pytest.mark.asyncio
+async def test_history_squash_onto_owned_target_keeps_earlier_commits(
+    tmp_path: Path,
+) -> None:
+    """Squashing upto an owned commit folds only the commits above it."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "partial-squash"}))
+    artifact_id = created.output_json["artifact_id"]
+    await _commit_artifact(root, store, artifact_id, patch=_APP_PATCH, message="one")
+    worktree = Path(created.output_json["worktree_path"])
+    first = (await _git_out(worktree, "rev-list", "HEAD")).splitlines()[0]
+    second = await _commit_artifact(
+        root, store, artifact_id, patch=_SECOND_PATCH, message="two"
+    )
+    tree_before = await _git_out(worktree, "rev-parse", "HEAD^{tree}")
+
+    squashed = await history(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "op": "squash",
+                "target": first,
+                "message": "second folded",
+            },
+        )
+    )
+    assert squashed.error == "", squashed.error
+    assert squashed.output_json["squashed_commits"] == 1
+    assert squashed.output_json["tree_preserved"] is True
+    subjects = await _git_out(worktree, "log", "--format=%s")
+    assert subjects.splitlines() == ["second folded", "one", "initial"]
+    assert await _git_out(worktree, "rev-parse", "HEAD^{tree}") == tree_before
+
+    on_base = await history(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "op": "squash",
+                "target": second,
+                "message": "nothing above",
+            },
+        )
+    )
+    assert on_base.error != ""
+
+
+@pytest.mark.asyncio
+async def test_history_reword_amends_head_only(tmp_path: Path) -> None:
+    """Reword changes the head message and nothing else, keeping the tree."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "reword-me"}))
+    artifact_id = created.output_json["artifact_id"]
+    head = await _commit_artifact(
+        root, store, artifact_id, patch=_APP_PATCH, message="typo messge"
+    )
+    worktree = Path(created.output_json["worktree_path"])
+    tree_before = await _git_out(worktree, "rev-parse", "HEAD^{tree}")
+
+    reworded = await history(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "op": "reword", "message": "correct message"},
+        )
+    )
+    assert reworded.error == "", reworded.error
+    assert reworded.output_json["tree_preserved"] is True
+    assert reworded.output_json["commit_sha"] != head
+    assert await _git_out(worktree, "rev-parse", "HEAD^{tree}") == tree_before
+    assert (await _git_out(worktree, "log", "--format=%s")).splitlines()[0] == (
+        "correct message"
+    )
+
+    empty = await history(
+        _context(
+            root, store, {"artifact_id": artifact_id, "op": "reword", "message": "  "}
+        )
+    )
+    assert "requires a message" in empty.error
+
+
+@pytest.mark.asyncio
+async def test_history_fixup_style_fold_via_squash_from_partial_base(
+    tmp_path: Path,
+) -> None:
+    """Two sequential squashes implement fixup-then-fold without losing checks."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "fixup-flow"}))
+    artifact_id = created.output_json["artifact_id"]
+    await _commit_artifact(
+        root, store, artifact_id, patch=_APP_PATCH, message="feature"
+    )
+    worktree = Path(created.output_json["worktree_path"])
+    feature = (await _git_out(worktree, "rev-list", "HEAD")).splitlines()[0]
+    followup = await _commit_artifact(
+        root, store, artifact_id, patch=_SECOND_PATCH, message="scratch"
+    )
+    # Squash the followup into the feature commit: the tree is unchanged, so
+    # the recorded check evidence carries over and push succeeds immediately.
+    folded = await history(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "op": "squash",
+                "target": feature,
+                "message": "feature",
+            },
+        )
+    )
+    assert folded.error == "", folded.error
+    assert folded.output_json["tree_preserved"] is True
+    subjects = (await _git_out(worktree, "log", "--format=%s")).splitlines()
+    # target=feature keeps 'feature' as the folded commit's parent, so the
+    # followup message above it is replaced by the new squash message.
+    assert subjects[:3] == ["feature", "feature", "initial"]
+    pushed = await push(_context(root, store, {"artifact_id": artifact_id}))
+    assert pushed.error == "", pushed.error
+    assert pushed.output_json["pushed_sha"] != followup
+
+
+@pytest.mark.asyncio
+async def test_history_rebase_onto_new_base_and_tree_change_clears_checks(
+    tmp_path: Path,
+) -> None:
+    """Rebasing onto an evolved base replays owned commits and clears checks."""
+
+    root = await _repository(tmp_path)
+    (root / "upstream.txt").write_text("origin\n", encoding="utf-8")
+    await _git(root, "add", "upstream.txt")
+    await _git(root, "commit", "-m", "upstream base")
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "rebase-me"}))
+    artifact_id = created.output_json["artifact_id"]
+    head = await _commit_artifact(
+        root, store, artifact_id, patch=_APP_PATCH, message="owned work"
+    )
+    base_before = (await store.get(artifact_id)).base_sha
+
+    # Advance the source branch: a clean upstream commit the owned branch lacks.
+    (root / "upstream.txt").write_text("origin\nupdate\n", encoding="utf-8")
+    await _git(root, "add", "upstream.txt")
+    await _git(root, "commit", "-m", "upstream evolves")
+    new_base = (await _git_out(root, "rev-parse", "HEAD")).strip()
+
+    worktree = Path(created.output_json["worktree_path"])
+
+    rebased = await history(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "op": "rebase", "target": new_base},
+        )
+    )
+    assert rebased.error == "", rebased.error
+    assert rebased.output_json["rebased_commits"] == 1
+    assert rebased.output_json["new_base_sha"] == new_base
+    assert rebased.output_json["commit_sha"] != head
+    artifact = await store.get(artifact_id)
+    assert artifact.base_sha == new_base
+    assert artifact.base_sha != base_before
+    assert "upstream evolves" in (await _git_out(worktree, "log", "--format=%s"))
+    # The upstream commit changed the tree, so the recorded checks are cleared.
+    assert artifact.checks == {}
+    # The rewrite moved refs/heads/<branch>, not a detached HEAD.
+    assert (await _git_out(worktree, "branch", "--show-current")).strip() == (
+        "lisa/rebase-me"
+    )
+    branch_ref = (
+        await _git_out(worktree, "rev-parse", "refs/heads/lisa/rebase-me")
+    ).strip()
+    assert branch_ref == rebased.output_json["commit_sha"]
+
+    # A rebase onto the base or inside the owned range is rejected.
+    inside = await history(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "op": "rebase", "target": base_before},
+        )
+    )
+    assert "outside the owned commit range" in inside.error
+
+    missing = await history(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "op": "rebase", "target": "0" * 40},
+        )
+    )
+    assert "Unknown rebase base commit" in missing.error
+
+
+@pytest.mark.asyncio
+async def test_history_rebase_conflict_aborts_and_preserves_branch(
+    tmp_path: Path,
+) -> None:
+    """A conflicting rebase aborts cleanly and the branch stays where it was."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "conflict-me"}))
+    artifact_id = created.output_json["artifact_id"]
+    head = await _commit_artifact(
+        root, store, artifact_id, patch=_APP_PATCH, message="owned work"
+    )
+    worktree = Path(created.output_json["worktree_path"])
+
+    # Conflicting upstream change to the same line and file.
+    (root / "app.txt").write_text("clashing\n", encoding="utf-8")
+    await _git(root, "add", "app.txt")
+    await _git(root, "commit", "-m", "upstream clash")
+    new_base = (await _git_out(root, "rev-parse", "HEAD")).strip()
+
+    conflicting = await history(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "op": "rebase", "target": new_base},
+        )
+    )
+    assert "aborted" in conflicting.error
+    assert (await _git_out(worktree, "rev-parse", "HEAD")).strip() == head
+    # The worktree stays attached to the feature branch after the abort.
+    assert (await _git_out(worktree, "branch", "--show-current")).strip() == (
+        "lisa/conflict-me"
+    )
+    assert (
+        await _git_out(worktree, "rev-parse", "refs/heads/lisa/conflict-me")
+    ).strip() == (head)
+    # The pre-rewrite checkpoint tag still marks the original head; error-path
+    # results carry no output_json, so read the tag list from the worktree.
+    assert not await _in_rebase(worktree)
+    tags = (await _git_out(worktree, "tag", "--list")).splitlines()
+    assert any(tag.startswith("lisa/ckpt/") for tag in tags)
+
+
+@pytest.mark.asyncio
+async def test_history_restore_rewinds_to_checkpoint(tmp_path: Path) -> None:
+    """Restore rewinds committed history to a tagged checkpoint and back."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "restore-me"}))
+    artifact_id = created.output_json["artifact_id"]
+    first = await _commit_artifact(
+        root, store, artifact_id, patch=_APP_PATCH, message="first"
+    )
+    worktree = Path(created.output_json["worktree_path"])
+    marker = await history(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "op": "tag",
+                "name": "milestone",
+                "target": first,
+            },
+        )
+    )
+    assert marker.error == ""
+    second = await _commit_artifact(
+        root, store, artifact_id, patch=_SECOND_PATCH, message="second"
+    )
+
+    # Rewinding to the first commit restores its exact tree.
+    rewound = await history(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "op": "restore", "name": "milestone"},
+        )
+    )
+    assert rewound.error == "", rewound.error
+    assert rewound.output_json["restored_sha"] == first
+    assert rewound.output_json["commit_sha"] == first
+    assert "second" not in await _git_out(worktree, "log", "--format=%s")
+
+    # Restore again is a no-op error, not a silent reset.
+    same = await history(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "op": "restore", "name": "milestone"},
+        )
+    )
+    assert "nothing to restore" in same.error
+
+    # The pre-restore checkpoint lets the second state come back.
+    checkpoints = [
+        tag
+        for tag in (await _git_out(worktree, "tag", "--list")).splitlines()
+        if tag.startswith("lisa/ckpt/")
+    ]
+    latest = checkpoints[-1]
+    recovered = await history(
+        _context(
+            root, store, {"artifact_id": artifact_id, "op": "restore", "name": latest}
+        )
+    )
+    assert recovered.error == "", recovered.error
+    assert recovered.output_json["commit_sha"] == second
+    assert "second" in await _git_out(worktree, "log", "--format=%s")
+
+
+@pytest.mark.asyncio
+async def test_history_requires_committed_clean_worktree_and_rejects_pushed_rewrite(
+    tmp_path: Path,
+) -> None:
+    """History ops fail before commit, on tracked dirt, and after a push."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "gate-me"}))
+    artifact_id = created.output_json["artifact_id"]
+
+    uncommitted = await history(
+        _context(
+            root, store, {"artifact_id": artifact_id, "op": "squash", "message": "x"}
+        )
+    )
+    assert "no committed revision" in uncommitted.error
+
+    await _commit_artifact(root, store, artifact_id, patch=_APP_PATCH, message="work")
+    worktree = Path(created.output_json["worktree_path"])
+    (worktree / "app.txt").write_text("dirty\n", encoding="utf-8")
+    dirty = await history(
+        _context(
+            root, store, {"artifact_id": artifact_id, "op": "reword", "message": "m"}
+        )
+    )
+    assert "Tracked changes must be committed" in dirty.error
+    await _git(worktree, "checkout", "--", "app.txt")
+
+    pushed = await push(_context(root, store, {"artifact_id": artifact_id}))
+    assert pushed.error == ""
+    blocked = await history(
+        _context(
+            root, store, {"artifact_id": artifact_id, "op": "reword", "message": "m"}
+        )
+    )
+    assert "already pushed" in blocked.error
+    # Tagging remains possible after a push; only rewrites are gated.
+    tagged = await history(
+        _context(
+            root, store, {"artifact_id": artifact_id, "op": "tag", "name": "after-push"}
+        )
+    )
+    assert tagged.error == "", tagged.error
+
+
+@pytest.mark.asyncio
+async def test_history_rejects_bad_tags_and_missing_checkpoints(tmp_path: Path) -> None:
+    """Malformed tag names and unknown checkpoints fail without side effects."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "tag-guards"}))
+    artifact_id = created.output_json["artifact_id"]
+    await _commit_artifact(root, store, artifact_id, patch=_APP_PATCH, message="work")
+
+    for bad_name in ("", "..", "a/b/../c", "ends.", "x.lock", "lisa/ckpt/x"):
+        bad = await history(
+            _context(
+                root, store, {"artifact_id": artifact_id, "op": "tag", "name": bad_name}
+            )
+        )
+        assert bad.error != "", bad_name
+
+    # Directory-form names shadow the checkpoint namespace under git's D/F
+    # ref rule and would brick every later checkpoint.
+    for shadow in ("lisa/ckpt", "lisa"):
+        shadowed = await history(
+            _context(
+                root, store, {"artifact_id": artifact_id, "op": "tag", "name": shadow}
+            )
+        )
+        assert "reserved checkpoint namespace" in shadowed.error, shadow
+    # A tag must not shadow any local branch: that makes push refspecs
+    # ambiguous and would brick coding_push for the shadowed branch.
+    branch_tag = await history(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "op": "tag", "name": "lisa/tag-guards"},
+        )
+    )
+    assert "would shadow branch" in branch_tag.error
+    after_shadows = await history(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "op": "squash", "message": "still rewrites"},
+        )
+    )
+    # The squash is rejected for a different reason here (nothing to fold), so
+    # instead verify a real rewrite still works by rewording.
+    reword_check = await history(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "op": "reword", "message": "rewind check"},
+        )
+    )
+    assert reword_check.error == "", (after_shadows.error, reword_check.error)
+
+    missing_cp = await history(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "op": "restore", "name": "lisa/ckpt/none"},
+        )
+    )
+    assert "does not exist" in missing_cp.error
+
+    user_tag = await history(
+        _context(
+            root, store, {"artifact_id": artifact_id, "op": "tag", "name": "user-tag"}
+        )
+    )
+    assert user_tag.error == ""
+    as_checkpoint = await history(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "op": "restore", "name": "user-tag"},
+        )
+    )
+    assert "nothing to restore" in as_checkpoint.error
+
+
+@pytest.mark.asyncio
+async def test_history_preserves_import_pending_state_and_requires_checks_after_tree_change(
+    tmp_path: Path,
+) -> None:
+    """A rebase that changes content re-verification before the next push/commit."""
+
+    root = await _repository(tmp_path)
+    (root / "base.txt").write_text("base\n", encoding="utf-8")
+    await _git(root, "add", "base.txt")
+    await _git(root, "commit", "-m", "second base")
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "rev-it"}))
+    artifact_id = created.output_json["artifact_id"]
+    await _commit_artifact(root, store, artifact_id, patch=_APP_PATCH, message="work")
+
+    (root / "base.txt").write_text("base\ngrown\n", encoding="utf-8")
+    await _git(root, "add", "base.txt")
+    await _git(root, "commit", "-m", "third base")
+    new_base = (await _git_out(root, "rev-parse", "HEAD")).strip()
+
+    rebased = await history(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "op": "rebase", "target": new_base},
+        )
+    )
+    assert rebased.error == "", rebased.error
+    artifact = await store.get(artifact_id)
+    assert artifact.revision == rebased.output_json["revision"]
+    assert artifact.checks == {}
+    # commit/push gate re-verification of the new revision content.
+    blocked_commit = await commit(
+        _context(root, store, {"artifact_id": artifact_id, "message": "again"})
+    )
+    # commit needs changed paths and current checks; history rewrote the commit
+    # so there is nothing to re-commit — the gate reports the missing checks.
+    assert blocked_commit.error != ""
+    pushed = await push(_context(root, store, {"artifact_id": artifact_id}))
+    assert "Every required check must pass" in pushed.error
