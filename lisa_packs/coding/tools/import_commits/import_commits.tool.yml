@@ -1,6 +1,6 @@
 tool_id: coding_import_commits
 pack_id: lisa-pack-coding
-description: "Import one already-merged upstream commit into an owned coding worktree: coding_create_worktree must have created it with the same import_commit, the worktree base must be that commit's parent, and the commit's diff (full-index/binary, --unidiff-zero) is applied as one patch revision that clears checks. Cannot re-import the same commit before a commit or patch export; paths in generated directories and empty commits are rejected. Prefer fresh work over imports."
+description: "Import one already-merged upstream commit into an owned coding worktree: coding_create_worktree must have created it with the same import_commit (any Git revision form is accepted; it resolves to the canonical full SHA), the worktree base must be that commit's parent, and the commit's diff (full-index/binary, --unidiff-zero) is applied as one patch revision that clears checks. Cannot re-import the same commit before a commit or patch export; paths in generated directories and empty commits are rejected. Prefer fresh work over imports."
 exportable: true
 effect: write
 approval_required: true

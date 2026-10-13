@@ -1743,3 +1743,143 @@ async def test_create_worktree_rejects_worktree_dir_inside_source(tmp_path: Path
     created = await create_worktree(ctx)
 
     assert "outside the source workspace" in created.error
+
+
+@pytest.mark.asyncio
+async def test_import_commit_accepts_revision_expressions(tmp_path: Path) -> None:
+    """import_commit accepts rev expressions and records the resolved full SHA.
+
+    Regression guard for the pydantic pattern that rejected model-friendly
+    revision text (e.g. ``HEAD``) with ``string_pattern_mismatch`` before git
+    could resolve it.
+    """
+
+    root = await _repository(tmp_path)
+    base0 = (await (await asyncio.create_subprocess_exec(
+        "git", "rev-parse", "HEAD",
+        cwd=str(root), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )).communicate())[0].decode().strip()
+    (root / "notes.txt").write_text("one\ntwo\n", encoding="utf-8")
+    await _git(root, "add", "notes.txt")
+    await _git(root, "commit", "-m", "record upstream change")
+    target_sha = (await (await asyncio.create_subprocess_exec(
+        "git", "rev-parse", "HEAD",
+        cwd=str(root), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )).communicate())[0].decode().strip()
+
+    store = MemoryWorkProductStore()
+    created = await create_worktree(
+        _context(root, store, {"summary": "replay via HEAD", "name": "import-head",
+                               "import_commit": "HEAD"})
+    )
+    assert created.error == "", created.error
+    artifact_id = created.output_json["artifact_id"]
+    # HEAD resolved to the same commit as the source base+1 and branched at its parent.
+    assert created.output_json["base_sha"] == base0
+    assert created.output_json["import_commit"] == target_sha
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    assert artifact.import_commit == target_sha
+
+    imported = await import_commits(
+        _context(root, store, {"artifact_id": artifact_id, "import_commit": "HEAD"})
+    )
+    assert imported.error == "", imported.error
+    assert imported.output_json["import_commit"] == target_sha
+    assert imported.output_json["changed_paths"] == ["notes.txt"]
+    assert imported.output_json["base_sha"] == base0
+    worktree = Path(created.output_json["worktree_path"])
+    assert (worktree / "notes.txt").read_text(encoding="utf-8") == "one\ntwo\n"
+    stored = await store.get(artifact_id)
+    assert stored is not None
+    assert stored.imported_commits == {target_sha: base0}
+    assert stored.import_commit == target_sha
+    assert stored.status == "patched"
+
+
+@pytest.mark.asyncio
+async def test_import_commits_matches_alias_with_full_sha(tmp_path: Path) -> None:
+    """A worktree anchored via a bare SHA imports cleanly from HEAD and vice versa."""
+
+    root = await _repository(tmp_path)
+    base0 = (await (await asyncio.create_subprocess_exec(
+        "git", "rev-parse", "HEAD",
+        cwd=str(root), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )).communicate())[0].decode().strip()
+    (root / "note.txt").write_text("n\n", encoding="utf-8")
+    await _git(root, "add", "note.txt")
+    await _git(root, "commit", "-m", "record upstream change")
+    target_sha = (await (await asyncio.create_subprocess_exec(
+        "git", "rev-parse", "HEAD",
+        cwd=str(root), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )).communicate())[0].decode().strip()
+
+    store = MemoryWorkProductStore()
+    created = await create_worktree(
+        _context(root, store, {"summary": "anchored by sha", "name": "import-alias",
+                               "import_commit": target_sha})
+    )
+    assert created.error == "", created.error
+    artifact_id = created.output_json["artifact_id"]
+
+    # Same commit via HEAD must not hit the recorded-anchor guard.
+    imported = await import_commits(
+        _context(root, store, {"artifact_id": artifact_id, "import_commit": "HEAD"})
+    )
+    assert imported.error == "", imported.error
+    assert imported.output_json["import_commit"] == target_sha
+    stored = await store.get(artifact_id)
+    assert stored is not None
+    assert stored.imported_commits == {target_sha: base0}
+
+    checked = await run_check(
+        _context(root, store, {"artifact_id": artifact_id, "check_id": "unit"})
+    )
+    assert checked.output_json["status"] == "passed"
+    committed = await commit(
+        _context(root, store, {"artifact_id": artifact_id, "message": "replay"})
+    )
+    assert committed.error == ""
+
+    # A plain HEAD-based worktree importing a known-but-different commit
+    # resolves fine and then fails the base guard.
+    (root / "later.txt").write_text("l\n", encoding="utf-8")
+    await _git(root, "add", "later.txt")
+    await _git(root, "commit", "-m", "later work")
+    mismatched = await create_worktree(_context(root, store, {"summary": "plain"}))
+    assert mismatched.error == "", mismatched.error
+    other_id = mismatched.output_json["artifact_id"]
+    other = await import_commits(
+        _context(root, store, {"artifact_id": other_id, "import_commit": "HEAD~1"})
+    )
+    assert "must branch from the import commit's parent" in other.error
+
+
+@pytest.mark.asyncio
+async def test_import_commits_rejects_non_commits(tmp_path: Path) -> None:
+    """Root commits (no parent) and unknown revisions fail with clear errors."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+
+    unknown = await create_worktree(
+        _context(root, store, {"summary": "unknown", "name": "import-nope",
+                               "import_commit": "definitely-not-a-rev"})
+    )
+    assert "Unknown import commit 'definitely-not-a-rev'" in unknown.error
+
+    # Anchor at the repository's only-parentless commit: creating with it
+    # fails the parent guard, and importing cannot resolve a parent either.
+    root_sha = (await (await asyncio.create_subprocess_exec(
+        "git", "rev-list", "--max-parents=0", "HEAD",
+        cwd=str(root), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )).communicate())[0].decode().strip()
+    (root / "x.txt").write_text("x\n", encoding="utf-8")
+    await _git(root, "add", "x.txt")
+    await _git(root, "commit", "-m", "second")
+
+    parentless = await create_worktree(
+        _context(root, store, {"summary": "parentless", "name": "import-parentless",
+                               "import_commit": root_sha})
+    )
+    assert "no parent; the worktree base cannot match it" in parentless.error

@@ -43,11 +43,11 @@ owned worktree, never the source checkout.
 
 | Tool | Effect | Approval | Role |
 | --- | --- | --- | --- |
-| `coding_create_worktree` | write | ✓ | Mint a task-bound artifact + `git worktree add` an isolated branch at the source `HEAD` (or at `import_commit`'s parent when given). Pass `name` (e.g. `auth-refactor`) for the branch `<prefix><name>` and worktree `<worktree-dir>/<name>`; without one a short random id is used. Name clashes and protected slugs fail fast. Worktree lives **outside** the source tree, enforced. |
+| `coding_create_worktree` | write | ✓ | Mint a task-bound artifact + `git worktree add` an isolated branch at the source `HEAD` (or at `import_commit`'s commit's parent when given — `import_commit` accepts any Git revision: full or short SHA, branch, tag, or HEAD, resolved to the full SHA). Pass `name` (e.g. `auth-refactor`) for the branch `<prefix><name>` and worktree `<worktree-dir>/<name>`; without one a short random id is used. Name clashes and protected slugs fail fast. Worktree lives **outside** the source tree, enforced. |
 | `coding_list_worktrees` | read | — | List the session's owned worktrees for this workspace (branch, path, `artifact_id`, status, revision, summary) so the model can name, find, and reuse them. |
 | `coding_edit_files` | write | ✓ | Preferred editor: apply exact, hash-guarded replacements, creates, or deletes as one revision. Replacements match the original snapshot and must not overlap. The tool generates and prevalidates the Git patch, preserving supplied content and EOF newlines. |
 | `coding_apply_patch` | write | ✓ | Fallback for existing unified diffs: prevalidate (`git apply --check`) and apply a bounded patch. Bumps `revision`, records `changed_paths`, **clears `checks`** (stale results are invalidated). |
-| `coding_import_commits` | write | ✓ | Replay one already-merged upstream commit onto the owned worktree: the worktree must be created with `import_commit` (base = that commit's parent), the commit's diff applies as one patch revision, and `checks` are cleared. Rejects re-import before a commit/export, base drift, and empty commits. |
+| `coding_import_commits` | write | ✓ | Replay one already-merged upstream commit onto the owned worktree: the worktree must be created with `import_commit` (base = that commit's parent; any Git revision form matching the creation anchor), the commit's diff applies as one patch revision, and `checks` are cleared. Rejects re-import before a commit/export, base drift, and empty commits. |
 | `coding_prepare_workspace` | write | ✓ | Run a configured locked Python/uv preparation recipe in the owned sandbox and record preparation evidence. |
 | `coding_run_check` | write | ✓ | Run one named check through the bwrap owner's direct-write sandbox floor. Result records the current revision and candidate-tree hash; no host fallback. A `verify` check that rewrites files fails and its edits are reverted; a `fix` check's edits become a new revision (like a patch) and stale the other checks. |
 | `coding_commit` | write | ✓ | Stage commit candidates and commit only after required checks passed for this revision and tree, on the owned unprotected branch. The message may be any length and span multiple lines. Committing clears pending `imported_commits` state (the imported content is carried by the commit). |
@@ -115,7 +115,9 @@ list_worktrees ─▶ create_worktree ─▶ edit_files ─▶ run_check ─▶ 
 ```
 
 Create a worktree anchored at an upstream commit with the optional
-`import_commit` parameter (base = that commit's parent); the companion
+`import_commit` parameter (base = that commit's parent; accepts any Git
+revision — full or short SHA, branch, tag, or HEAD — resolved to the full
+SHA); the companion
 `coding_import_commits` then replays that one commit's diff as an ordinary
 patch revision — the whole verify → commit → push → PR lifecycle carries the
 replayed content like any fresh change (e.g. one PR per already-merged commit).
