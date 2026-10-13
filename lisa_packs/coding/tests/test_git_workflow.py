@@ -36,6 +36,7 @@ from lisa_packs.coding.tools.export_patches.export_patches import (
     execute as export_patches,
 )
 from lisa_packs.coding.tools.find_files.find_files import execute as find_files
+from lisa_packs.coding.tools.import_commits.import_commits import execute as import_commits
 from lisa_packs.coding.tools.list_directory.list_directory import (
     execute as list_directory,
 )
@@ -211,6 +212,182 @@ async def test_create_worktree_rejects_invalid_and_protected_names(tmp_path: Pat
     assert "slug" in invalid.error
     protected = await create_worktree(_context(root, store, {"name": "main"}))
     assert "protected" in protected.error
+
+
+@pytest.mark.asyncio
+async def test_import_full_lifecycle_and_push(tmp_path: Path) -> None:
+    """Reproduce one merged upstream commit on its own branch and push it.
+
+    The worktree is created at the commit's parent, the import tool applies
+    the commit's diff, a verification-only required check certifies the tree,
+    and the checked commit pushes like any ordinary artifact.
+    """
+
+    root = await _repository(tmp_path)
+    (root / "notes.txt").write_text("one\n", encoding="utf-8")
+    await _git(root, "add", "notes.txt")
+    await _git(root, "commit", "-m", "base commit")
+    head = await asyncio.create_subprocess_exec(
+        "git", "rev-parse", "HEAD",
+        cwd=str(root), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    out, _ = await head.communicate()
+    base0 = out.decode().strip()
+    (root / "notes.txt").write_text("one\ntwo\n", encoding="utf-8")
+    (root / "extra").mkdir()
+    (root / "extra" / "detail.txt").write_text("detail\n", encoding="utf-8")
+    await _git(root, "add", "notes.txt", "extra/detail.txt")
+    await _git(root, "commit", "-m", "record upstream change")
+    target = await asyncio.create_subprocess_exec(
+        "git", "rev-parse", "HEAD",
+        cwd=str(root), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    out, _ = await target.communicate()
+    target_sha = out.decode().strip()
+
+    store = MemoryWorkProductStore()
+    created = await create_worktree(
+        _context(root, store, {"summary": "replay record upstream change", "name": "import-test",
+                               "import_commit": target_sha})
+    )
+    assert created.error == ""
+    artifact_id = created.output_json["artifact_id"]
+    assert created.output_json["base_sha"] == base0
+
+    imported = await import_commits(
+        _context(root, store, {"artifact_id": artifact_id, "import_commit": target_sha})
+    )
+    assert imported.error == ""
+    assert imported.output_json["changed_paths"] == ["extra/detail.txt", "notes.txt"]
+    worktree = Path(created.output_json["worktree_path"])
+    assert (worktree / "notes.txt").read_text(encoding="utf-8") == "one\ntwo\n"
+    assert (worktree / "extra" / "detail.txt").read_text(encoding="utf-8") == "detail\n"
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    assert artifact.imported_commits == {target_sha: base0}
+    assert artifact.import_commit == target_sha
+    assert artifact.status == "patched"
+
+    duplicate = await import_commits(
+        _context(root, store, {"artifact_id": artifact_id, "import_commit": target_sha})
+    )
+    assert "already imported" in duplicate.error
+
+    checked = await run_check(
+        _context(root, store, {"artifact_id": artifact_id, "check_id": "unit"})
+    )
+    assert checked.output_json["status"] == "passed"
+
+    committed = await commit(
+        _context(root, store, {"artifact_id": artifact_id, "message": "record upstream change"})
+    )
+    assert committed.error == ""
+    pushed = await push(_context(root, store, {"artifact_id": artifact_id}))
+    assert pushed.error == ""
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    # Post-commit state is fresh ordinary state.
+    assert artifact.imported_commits == {}
+    assert artifact.import_commit == ""
+    assert artifact.status == "pushed"
+
+    listing = await list_worktrees(_context(root, store, {}))
+    assert listing.error == ""
+    assert listing.output_json["worktrees"][0]["imported_commits"] == {}
+
+    cleaned = await cleanup_worktree(_context(root, store, {"artifact_id": artifact_id}))
+    assert cleaned.error == ""
+
+
+@pytest.mark.asyncio
+async def test_import_requires_match_creation_base_and_uncommitted(tmp_path: Path) -> None:
+    """An artifact must branch at the import commit's parent to import it."""
+
+    root = await _repository(tmp_path)
+    parent_sha = (await (await asyncio.create_subprocess_exec(
+        "git", "rev-parse", "HEAD",
+        cwd=str(root), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )).communicate())[0].decode().strip()
+    (root / "other.txt").write_text("x\n", encoding="utf-8")
+    await _git(root, "add", "other.txt")
+    await _git(root, "commit", "-m", "other change")
+    commit_sha = (await (await asyncio.create_subprocess_exec(
+        "git", "rev-parse", "HEAD",
+        cwd=str(root), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )).communicate())[0].decode().strip()
+
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "HEAD-based"}))
+    assert created.error == ""
+    artifact_id = created.output_json["artifact_id"]
+
+    mismatched = await import_commits(
+        _context(root, store, {"artifact_id": artifact_id, "import_commit": commit_sha})
+    )
+    assert "must branch from the import commit's parent" in mismatched.error
+
+    matching = await create_worktree(
+        _context(root, store, {"summary": "anchored", "name": "import-match",
+                               "import_commit": commit_sha})
+    )
+    assert matching.error == ""
+    matching_id = matching.output_json["artifact_id"]
+    assert matching.output_json["import_commit"] == commit_sha
+    worktree = Path(matching.output_json["worktree_path"])
+    # A fresh import-anchored worktree shows coherent ordinary state.
+    inspected = await status(_context(root, store, {"artifact_id": matching_id}))
+    assert inspected.error == ""
+    assert inspected.output_json["git_status"] == "(clean)"
+    assert inspected.output_json["status"] == "created"
+    assert worktree.is_dir()
+    worktree_artifact = await store.get(matching_id)
+    assert worktree_artifact is not None
+    assert worktree_artifact.import_commit == commit_sha
+    assert worktree_artifact.imported_commits == {}
+
+
+@pytest.mark.asyncio
+async def test_import_rejects_wrong_base_and_unknown_commit(tmp_path: Path) -> None:
+    """Guard the import against drifted bases and unknown upstream commits."""
+    root = await _repository(tmp_path)
+    (root / "note.txt").write_text("n\n", encoding="utf-8")
+    await _git(root, "add", "note.txt")
+    await _git(root, "commit", "-m", "second")
+    second_sha = (await (await asyncio.create_subprocess_exec(
+        "git", "rev-parse", "HEAD",
+        cwd=str(root), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )).communicate())[0].decode().strip()
+    (root / "deeper.txt").write_text("d\n", encoding="utf-8")
+    await _git(root, "add", "deeper.txt")
+    await _git(root, "commit", "-m", "third")
+    third_sha = (await (await asyncio.create_subprocess_exec(
+        "git", "rev-parse", "HEAD",
+        cwd=str(root), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )).communicate())[0].decode().strip()
+
+    store = MemoryWorkProductStore()
+    created = await create_worktree(
+        _context(root, store, {"summary": "mismatch", "name": "import-mismatch",
+                               "import_commit": third_sha})
+    )
+    assert created.error == ""
+    artifact_id = created.output_json["artifact_id"]
+
+    unknown_creation = await create_worktree(
+        _context(root, store, {"summary": "unknown", "name": "import-unknown",
+                               "import_commit": "a" * 40})
+    )
+    assert f"Unknown import commit '{'a' * 40}'" in unknown_creation.error
+
+    wrong = await import_commits(
+        _context(root, store, {"artifact_id": artifact_id, "import_commit": second_sha})
+    )
+    assert "Artifact must import the commit recorded at worktree creation." in wrong.error
+
+    unknown = await import_commits(
+        _context(root, store, {"artifact_id": artifact_id, "import_commit": "a" * 40})
+    )
+    assert "Artifact must import the commit recorded at worktree creation." in unknown.error
 
 
 @pytest.mark.asyncio

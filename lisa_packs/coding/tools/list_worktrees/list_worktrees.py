@@ -25,6 +25,8 @@ def _entry(artifact, *, worktree_exists: bool) -> dict:
         "commit_sha": artifact.commit_sha,
         "pushed_sha": artifact.pushed_sha,
         "pr_url": artifact.pr_url,
+        "import_commit": artifact.import_commit,
+        "imported_commits": dict(artifact.imported_commits),
         "changed_paths": list(artifact.changed_paths),
         "summary": artifact.safe_summary,
     }
