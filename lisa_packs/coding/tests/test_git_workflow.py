@@ -1746,6 +1746,58 @@ async def test_create_worktree_rejects_worktree_dir_inside_source(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_create_worktree_names_default_parent_inside_source(
+    tmp_path: Path,
+) -> None:
+    """A data-dir default under the source names worktree_dir instead of failing opaquely.
+
+    Regression guard for the live failure where the host nests its data dir
+    inside the workspace (data=/workspace/artifacts): the default parent
+    <data-dir>/git-worktrees/<workspace-name> landed inside the source and
+    creation failed with the bare guard text, giving no path forward.
+    """
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    ctx = _context(root, store, {"name": "fix-something"})
+    ctx.data_dir = str(root / "artifacts")
+
+    created = await create_worktree(ctx)
+
+    assert created.error == "", created.error
+    assert created.output_json["worktree_path"] == str(
+        tmp_path / ".lisa-worktrees" / "fix-something"
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_worktree_fallback_inside_source_matches_unnamed_layout(
+    tmp_path: Path,
+) -> None:
+    """The in-source fallback keeps the same parent for named and unnamed trees.
+
+    Pins the fallback landing place so an unnamed (artifact-id) worktree and a
+    named one land under the same <workspace-parent>/.lisa-worktrees parent as
+    the named case above.
+    """
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    ctx = _context(root, store, {})
+    ctx.data_dir = str(root / "artifacts")
+
+    created = await create_worktree(ctx)
+
+    assert created.error == "", created.error
+    worktree_path = Path(created.output_json["worktree_path"])
+    assert worktree_path.parent == tmp_path / ".lisa-worktrees"
+    cleaned = await cleanup_worktree(
+        _context(root, store, {"artifact_id": created.output_json["artifact_id"]})
+    )
+    assert cleaned.error == ""
+
+
+@pytest.mark.asyncio
 async def test_import_commit_accepts_revision_expressions(tmp_path: Path) -> None:
     """import_commit accepts rev expressions and records the resolved full SHA.
 

@@ -204,8 +204,10 @@ where `kind` is `verify` (default) or `fix`),
 (`main`,`master`), `push_remote` (`origin`), `patch_export_dir` (empty →
 `<source-parent>/.lisa-patches`; must be absolute and outside the source),
 `worktree_dir` (empty → `<data-dir>/git-worktrees/<workspace-name>` from the
-host-injected data dir; must be absolute; the resolved worktree directory must
-stay outside the source), and the byte/line/result bounds
+host-injected data dir, except that a data dir nested inside the source
+workspace falls back to `<source-parent>/.lisa-worktrees` so the worktree
+always lands outside the source; must be absolute; the resolved worktree
+directory must stay outside the source), and the byte/line/result bounds
 (`max_file_bytes` 512 000, `max_read_lines` 400, `max_patch_bytes` 200 000,
 `max_command_output_bytes` 100 000, `git_timeout_seconds` 60, …).
 
@@ -297,8 +299,10 @@ resources:
             persistence: direct-write
             network: deny
             paths:
-              # Worktree parent (default <data-dir>/git-worktrees/<workspace-name>
-              # unless worktree_dir is set) — grant rw so checks can write there.
+              # Worktree parent (default <data-dir>/git-worktrees/<workspace-name>,
+              # or <source-parent>/.lisa-worktrees when the data dir is nested
+              # inside the source; set worktree_dir to override) — grant rw so
+              # checks can write there.
               /home/you/.lisa/git-worktrees/my-project: rw
 routing:
   # Optional: route natural-language shell intent elsewhere; this pack is

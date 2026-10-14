@@ -121,8 +121,21 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         # The worktree must never land inside the source tree: the source
         # checkout stays untouched and the artifact owns one tree only.
         if worktree_parent.is_relative_to(source_root):
+            if config.worktree_dir:
+                raise CodingWorkflowError(
+                    "Resolved worktree directory must be outside the source workspace."
+                )
+            # With no explicit worktree_dir the default derives from the host
+            # data dir; a host that nests its data dir inside the workspace
+            # (data=/workspace/artifacts) makes that default land inside
+            # the source. Ask the operator to configure an explicit parent
+            # instead of failing with the bare guard text.
             raise CodingWorkflowError(
-                "Resolved worktree directory must be outside the source workspace."
+                "Resolved worktree directory must be outside the source workspace: "
+                "the host data dir lives inside the workspace, so the default "
+                "<data-dir>/git-worktrees/<workspace-name> is unusable. Set "
+                "worktree_dir to an absolute path outside the workspace in the "
+                "coding pack configuration."
             )
         # Unnamed worktrees keep the artifact-id directory (historical layout);
         # named worktrees use the slug so the tree is self-describing.

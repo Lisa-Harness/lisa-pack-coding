@@ -78,7 +78,9 @@ class CodingPackConfig(BaseModel):
     #: Absolute parent for exported patch series; empty means ``<source-parent>/.lisa-patches``.
     patch_export_dir: str = ""
     #: Absolute parent under which owned worktrees are created; empty means
-    #: ``<data-dir>/git-worktrees/<workspace-name>`` from the host-injected data dir.
+    #: ``<data-dir>/git-worktrees/<workspace-name>`` from the host-injected data
+    #: dir, or ``<workspace-parent>/.lisa-worktrees`` when that default would
+    #: land inside the source workspace (data-dir nested under the source).
     worktree_dir: str = ""
 
     @model_validator(mode="after")
@@ -119,11 +121,16 @@ class CodingPackConfig(BaseModel):
     def resolve_worktree_parent(self, *, data_dir: str, source_root: Path) -> Path:
         """Resolve the parent directory under which owned worktrees are created.
 
-        An explicit ``worktree_dir`` wins; otherwise the default lives inside
-        the host data dir at ``git-worktrees/<workspace-name>``, named after
-        the source checkout so several repositories share one data root. The
-        host always injects a resolved ``data_dir``; without one (a pack-only
-        context) creation fails fast rather than scattering worktrees in an
+        An explicit ``worktree_dir`` wins. The default lives inside the host
+        data dir at ``git-worktrees/<workspace-name>``, named after the source
+        checkout so several repositories share one data root — but a host that
+        nests its data dir inside the workspace (data=/workspace/artifacts)
+        would make that default land inside the source; there the parent is
+        placed under the workspace's *parent* at
+        ``<workspace-parent>/.lisa-worktrees`` instead, keeping the tree
+        outside the source as the containment guard requires. The host always
+        injects a resolved ``data_dir``; without one (a pack-only context)
+        creation fails fast rather than scattering worktrees in an
         unpredictable location.
         """
 
@@ -135,7 +142,11 @@ class CodingPackConfig(BaseModel):
                 "worktree_dir is not configured and the host injected no data_dir; "
                 "set worktree_dir to an absolute path."
             )
-        return Path(root) / "git-worktrees" / source_root.name
+        source = source_root.resolve()
+        default = Path(root) / "git-worktrees" / source.name
+        if not default.is_relative_to(source):
+            return default
+        return source.parent / ".lisa-worktrees"
 
     def preparation_recipe(self, recipe_id: str | None) -> CodingPreparationRecipe:
         """Return an explicitly or uniquely selected finite preparation recipe."""
