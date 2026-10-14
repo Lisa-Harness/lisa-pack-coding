@@ -289,8 +289,22 @@ def preparation_recipe_digest(recipe: CodingPreparationRecipe) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+#: Dependency manifests are trusted repo content hashed for staleness
+#: evidence, not model-facing reads: the digest streams the hash instead of
+#: loading the file, so the ceiling bounds work per file without coupling to
+#: the read tool's max_file_bytes. Real uv.lock files reach several hundred
+#: kilobytes; 8 MiB covers every plausibly hand-installed lock.
+_MANIFEST_MAX_BYTES = 8 * 1024 * 1024
+_MANIFEST_CHUNK_BYTES = 512 * 1024
+
+
 def dependency_manifest_digest(worktree: Path, *, config: CodingPackConfig) -> str:
-    """Hash the bounded uv manifests that determine the local environment."""
+    """Hash the uv manifests that determine the local environment.
+
+    Streams the hash: manifest size does not bound host memory, and a large
+    committed lock (real repositories reach hundreds of kilobytes) prepares
+    normally instead of tripping the read tool's byte cap.
+    """
 
     digest = hashlib.sha256()
     found = False
@@ -298,12 +312,19 @@ def dependency_manifest_digest(worktree: Path, *, config: CodingPackConfig) -> s
         path = worktree / name
         if not path.is_file():
             continue
-        payload = path.read_bytes()
-        if len(payload) > config.max_file_bytes:
+        size = path.stat().st_size
+        if size > _MANIFEST_MAX_BYTES:
             raise CodingWorkflowError(f"Dependency manifest exceeds byte limit: {name}")
         digest.update(name.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(payload)
+        remaining = size
+        with path.open("rb") as stream:
+            while remaining > 0:
+                chunk = stream.read(min(_MANIFEST_CHUNK_BYTES, remaining))
+                if not chunk:
+                    break
+                digest.update(chunk)
+                remaining -= len(chunk)
         digest.update(b"\0")
         found = True
     if not found:

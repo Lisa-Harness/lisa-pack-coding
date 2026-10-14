@@ -62,6 +62,7 @@ from lisa_packs.coding.config import (
     get_coding_config,
 )
 from lisa_packs.coding.workflow import (
+    dependency_manifest_digest,
     expand_argv_placeholders,
     preparation_recipe_digest,
     workspace_python,
@@ -962,6 +963,36 @@ async def test_configured_preparation_blocks_checks_until_current(tmp_path: Path
     )
 
     assert "Workspace preparation is missing or stale" in blocked.error
+
+
+def test_manifest_digest_streams_locks_larger_than_the_read_cap(tmp_path: Path) -> None:
+    """A big committed uv.lock prepares instead of tripping the read byte cap.
+
+    The lisa harness lock is 572 KB against a 512 KB max_file_bytes read cap;
+    the digest must cover trusted repo manifests of that size and stay stable
+    across streaming boundaries.
+    """
+
+    root = tmp_path / "source"
+    root.mkdir()
+    lock = root / "uv.lock"
+    # Larger than the default 512_000 read cap, crossing the 512 KB stream
+    # chunks more than once.
+    lock.write_bytes(b"# " + b"x" * (600_000 - 2) + b"\n")
+    config = CodingPackConfig(workspace_root=str(root))
+
+    digest = dependency_manifest_digest(root, config=config)
+
+    assert len(digest) == 64
+    expected = hashlib.sha256()
+    expected.update(b"uv.lock")
+    expected.update(b"\0")
+    expected.update(lock.read_bytes())
+    expected.update(b"\0")
+    assert digest == expected.hexdigest()
+    # A content change flips the digest (staleness evidence stays sensitive).
+    lock.write_bytes(lock.read_bytes() + b"# touched\n")
+    assert dependency_manifest_digest(root, config=config) != digest
 
 
 def test_recipe_prepare_argv_is_session_owned_and_digested(tmp_path: Path) -> None:
