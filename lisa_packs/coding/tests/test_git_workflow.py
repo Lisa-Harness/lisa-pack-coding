@@ -53,6 +53,20 @@ from lisa_packs.coding.tools.run_check.run_check import execute as run_check
 from lisa_packs.coding.tools.search_code.search_code import execute as search_code
 from lisa_packs.coding.tools.status.status import execute as status
 
+# The pack's typed, session-owned policy models (validation-contract tests).
+from pydantic import ValidationError
+
+from lisa_packs.coding.config import (
+    CodingPackConfig,
+    CodingPreparationRecipe,
+    get_coding_config,
+)
+from lisa_packs.coding.workflow import (
+    expand_argv_placeholders,
+    preparation_recipe_digest,
+    workspace_python,
+)
+
 
 async def _git(root: Path, *args: str) -> None:
     process = await asyncio.create_subprocess_exec(
@@ -925,7 +939,13 @@ async def test_configured_preparation_blocks_checks_until_current(tmp_path: Path
             "timeout_seconds": 30,
         }
     ]
-    recipes = [{"id": "python-uv", "project_modules": ["app"]}]
+    recipes = [
+        {
+            "id": "python-uv",
+            "prepare_argv": ("env", "TMPDIR=.lisa-tmp", "uv", "sync", "--locked", "--no-cache"),
+            "project_modules": ["app"],
+        }
+    ]
     created = await create_worktree(
         _context(root, store, {"summary": "prepared check"}, checks=checks, preparation_recipes=recipes)
     )
@@ -942,6 +962,130 @@ async def test_configured_preparation_blocks_checks_until_current(tmp_path: Path
     )
 
     assert "Workspace preparation is missing or stale" in blocked.error
+
+
+def test_recipe_prepare_argv_is_session_owned_and_digested(tmp_path: Path) -> None:
+    """The prepare command is a session argument vector like any check's."""
+
+    root = tmp_path / "source"
+    root.mkdir()
+    recipe = {
+        "id": "python-uv",
+        "prepare_argv": ("env", "TMPDIR=.lisa-tmp", "uv", "sync", "--locked", "--no-cache"),
+        "project_modules": ["app"],
+    }
+    config = get_coding_config(
+        _context(
+            root,
+            MemoryWorkProductStore(),
+            {},
+            checks=[{"id": "unit", "argv": ["{workspace_python}", "-c", "print('ok')"]}],
+            preparation_recipes=[recipe],
+        )
+    )
+
+    resolved = config.preparation_recipe("python-uv")
+    assert resolved.prepare_argv == (
+        "env",
+        "TMPDIR=.lisa-tmp",
+        "uv",
+        "sync",
+        "--locked",
+        "--no-cache",
+    )
+    # A session-authored change to the prepare command is a different recipe:
+    # preparation evidence recorded under the old vector must go stale.
+    mutated = CodingPreparationRecipe(
+        id="python-uv",
+        prepare_argv=("env", "TMPDIR=.lisa-tmp", "uv", "sync", "--locked"),
+        project_modules=("app",),
+    )
+    assert preparation_recipe_digest(resolved) != preparation_recipe_digest(mutated)
+
+    # Placeholder resolution stays pack-owned and targets the owned venv.
+    expanded = expand_argv_placeholders(
+        ("{workspace_python}", "-c", "print('ok')"), worktree=root
+    )
+    assert expanded == (str(workspace_python(root)), "-c", "print('ok')")
+
+
+def test_recipe_with_unknown_baseline_check_fails_validation(tmp_path: Path) -> None:
+    """A referencing recipe must fail configuration parsing, not at run time."""
+
+    root = tmp_path / "source"
+    root.mkdir()
+    with pytest.raises(ValidationError, match="unknown baseline checks"):
+        CodingPackConfig.model_validate(
+            {
+                "workspace_root": str(root),
+                "checks": [{"id": "unit", "argv": [sys.executable, "-c", "print('ok')"]}],
+                "preparation_recipes": [
+                    {
+                        "id": "python-uv",
+                        "prepare_argv": ("uv", "sync", "--locked"),
+                        "project_modules": ["app"],
+                        "baseline_check_ids": ["missing"],
+                    }
+                ],
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_failed_check_surfaces_the_real_output_tail(tmp_path: Path) -> None:
+    """The failure excerpt travels with the result so the diagnosis is actionable."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    checks = [
+        {
+            "id": "unit",
+            "argv": [sys.executable, "-c", "print('boom-detail')"],
+            "timeout_seconds": 30,
+        }
+    ]
+    created = await create_worktree(
+        _context(root, store, {"summary": "excerpt"}, checks=checks, required_check_ids=[])
+    )
+    artifact_id = created.output_json["artifact_id"]
+
+    failed = await run_check(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "check_id": "unit"},
+            checks=checks,
+            required_check_ids=[],
+            sandbox_result=ToolResult(output_text="boom-detail", output_json={"return_code": 2}),
+        )
+    )
+
+    assert failed.error == ""
+    assert failed.output_json["status"] == "failed"
+    # The cause is now in the tool result the model sees, not only on the
+    # persisted artifact record.
+    assert "boom-detail" in failed.output_text
+    assert "Failure output:" in failed.output_text
+    stored = await store.get(artifact_id)
+    assert stored is not None and "boom-detail" in stored.checks["unit"].stdout
+
+
+@pytest.mark.asyncio
+async def test_passing_check_carries_no_failure_excerpt(tmp_path: Path) -> None:
+    """Bounded excerpt discipline: only failures gain the failure output tail."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "passing"}))
+    artifact_id = created.output_json["artifact_id"]
+
+    passed = await run_check(
+        _context(root, store, {"artifact_id": artifact_id, "check_id": "unit"})
+    )
+
+    assert passed.error == ""
+    assert passed.output_json["status"] == "passed"
+    assert "Failure output:" not in passed.output_text
 
 
 @pytest.mark.asyncio

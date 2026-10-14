@@ -76,6 +76,12 @@ Capture relevant learnings to aid in future changes.
 Use `coding_apply_patch` to apply existing unified diff files,
 but not as the default way to author text changes.
 Run `coding_run_check` to validate your changes.
+Before the first check on a worktree, run `coding_prepare_workspace` with the
+artifact id: `coding_run_check` refuses to run until the workspace preparation
+is current, and preparing once gives every later check the same worktree-owned
+interpreter. The session configures exactly which preparation command runs
+(and which extras it installs) — do not guess recipe ids; list them with
+`coding_status` and use the configured one.
 Do not export patches or push changes unless explicitly requested.
 
 ## Choosing and organizing worktrees

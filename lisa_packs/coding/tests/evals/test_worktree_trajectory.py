@@ -394,6 +394,14 @@ async def _python_preparation_fixture(
             "preparation_recipes": [
                 {
                     "id": "python-uv",
+                    "prepare_argv": [
+                        "env",
+                        "TMPDIR=.lisa-tmp",
+                        "uv",
+                        "sync",
+                        "--locked",
+                        "--no-cache",
+                    ],
                     "project_modules": ["app"],
                     "baseline_check_ids": ["unit"],
                     "timeout_seconds": 60,

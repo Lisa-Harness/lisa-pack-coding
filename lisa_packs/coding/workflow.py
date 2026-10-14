@@ -35,6 +35,7 @@ __all__ = [
     "candidate_tree_sha",
     "changed_paths",
     "dependency_manifest_digest",
+    "expand_argv_placeholders",
     "expand_check_argv",
     "load_owned_artifact",
     "patch_paths",
@@ -51,6 +52,9 @@ __all__ = [
 ]
 
 _GIT_STATUS_PATH_OFFSET = 3
+# The one placeholder session-authored command vectors may use; the pack
+# resolves it, never the model or the session text.
+_ARGV_PLACEHOLDER = "{workspace_python}"
 # Upper bound on reaping and draining once a process group has been killed.
 _KILL_GRACE_SECONDS = 5.0
 # Git must never wait on a human, and read-only commands such as ``status``
@@ -259,13 +263,23 @@ def workspace_python(worktree: Path) -> Path:
     return worktree / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
-def expand_check_argv(check: CodingCheck, *, worktree: Path) -> tuple[str, ...]:
-    """Resolve the sole preparation-aware command placeholder."""
+def expand_argv_placeholders(argv: tuple[str, ...], *, worktree: Path) -> tuple[str, ...]:
+    """Resolve the sole preparation-aware command placeholder.
+
+    Shared by session-configured checks and preparation recipes: the session
+    authors the command vector, the pack resolves only ``{workspace_python}``
+    to the worktree-owned interpreter (and never invents toolchain flags).
+    """
 
     return tuple(
-        str(workspace_python(worktree)) if part == "{workspace_python}" else part
-        for part in check.argv
+        str(workspace_python(worktree)) if part == _ARGV_PLACEHOLDER else part for part in argv
     )
+
+
+def expand_check_argv(check: CodingCheck, *, worktree: Path) -> tuple[str, ...]:
+    """Resolve the check's command-vector placeholders."""
+
+    return expand_argv_placeholders(check.argv, worktree=worktree)
 
 
 def preparation_recipe_digest(recipe: CodingPreparationRecipe) -> str:

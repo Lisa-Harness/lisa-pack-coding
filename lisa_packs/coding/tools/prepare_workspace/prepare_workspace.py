@@ -1,4 +1,4 @@
-"""Prepare a configured Python/uv environment inside an owned worktree."""
+"""Prepare the session-configured environment inside an owned worktree."""
 
 from __future__ import annotations
 
@@ -8,12 +8,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kernel.models import ToolExecutionContext, ToolResult
+from pydantic import BaseModel, Field
+from sdk.workproducts import (
+    WorkProductCheck,
+    WorkProductCheckStatus,
+    WorkProductPreparation,
+)
+
 from lisa_packs.coding.config import CodingPreparationRecipe, get_coding_config
 from lisa_packs.coding.workflow import (
     CodingWorkflowError,
     artifact_worktree,
     candidate_tree_sha,
     dependency_manifest_digest,
+    expand_argv_placeholders,
     expand_check_argv,
     load_owned_artifact,
     preparation_recipe_digest,
@@ -21,8 +29,6 @@ from lisa_packs.coding.workflow import (
     run_git,
     workspace_python,
 )
-from pydantic import BaseModel, Field
-from sdk.workproducts import WorkProductCheck, WorkProductPreparation, WorkProductCheckStatus
 
 TOOL_ID = "coding_prepare_workspace"
 
@@ -51,21 +57,15 @@ class Parameters(BaseModel):
     recipe_id: str | None = Field(default=None, min_length=1, max_length=80)
 
 
-def _is_uv_project(worktree: Path) -> bool:
-    """Recognize only projects that explicitly declare uv metadata or a lockfile."""
-
-    lock = worktree / "uv.lock"
-    project = worktree / "pyproject.toml"
-    if lock.is_file():
-        return True
-    return project.is_file() and "[tool.uv]" in project.read_text(encoding="utf-8")
-
-
 async def _require_ignored_runtime_paths(worktree: Path, *, config) -> None:
     for path in (".venv", ".lisa-tmp"):
-        result = await run_git(worktree, ("check-ignore", "-q", "--", f"{path}/"), config=config)
+        result = await run_git(
+            worktree, ("check-ignore", "-q", "--", f"{path}/"), config=config
+        )
         if result.return_code != 0:
-            raise CodingWorkflowError(f"{path} must be ignored before preparing a workspace.")
+            raise CodingWorkflowError(
+                f"{path} must be ignored before preparing a workspace."
+            )
 
 
 def _record_baseline_check(
@@ -78,7 +78,11 @@ def _record_baseline_check(
     duration_ms: int,
 ) -> WorkProductCheck:
     status: WorkProductCheckStatus = (
-        "timed_out" if result.timed_out else "passed" if result.return_code == 0 else "failed"
+        "timed_out"
+        if result.timed_out
+        else "passed"
+        if result.return_code == 0
+        else "failed"
     )
     return WorkProductCheck(
         check_id=check_id,
@@ -94,7 +98,7 @@ def _record_baseline_check(
 
 
 async def execute(ctx: ToolExecutionContext) -> ToolResult:
-    """Sync and verify one finite Python/uv workspace preparation recipe."""
+    """Run and verify one finite session-configured preparation recipe."""
 
     params = Parameters.model_validate(ctx.parameters)
     artifact = None
@@ -106,14 +110,6 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             ctx, artifact_id=params.artifact_id, config=config, claim=True
         )
         worktree = artifact_worktree(artifact, config=config)
-        if not _is_uv_project(worktree):
-            raise CodingWorkflowError(
-                "Preparation supports only uv projects with uv.lock or [tool.uv]."
-            )
-        if not (worktree / "uv.lock").is_file():
-            raise CodingWorkflowError(
-                "uv preparation requires a committed uv.lock for --locked sync."
-            )
         await _require_ignored_runtime_paths(worktree, config=config)
         manifest_digest = dependency_manifest_digest(worktree, config=config)
         recipe_digest = preparation_recipe_digest(recipe)
@@ -128,18 +124,19 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
                 temporary_directory.stderr.strip()
                 or "Could not create workspace temporary directory."
             )
-        synced = await run_contained(
+        prepared = await run_contained(
             ctx,
-            ("env", "TMPDIR=.lisa-tmp", "uv", "sync", "--locked", "--no-cache"),
+            expand_argv_placeholders(recipe.prepare_argv, worktree=worktree),
             worktree=worktree,
             timeout_seconds=recipe.timeout_seconds,
         )
-        if synced.timed_out or synced.return_code != 0:
-            raise CodingWorkflowError(synced.stderr.strip() or "uv sync failed")
+        if prepared.timed_out or prepared.return_code != 0:
+            detail = prepared.stderr.strip() or prepared.stdout.strip()
+            raise CodingWorkflowError(detail or "Preparation command failed")
         python = workspace_python(worktree)
         if not python.is_file():
             raise CodingWorkflowError(
-                "uv sync did not create the worktree-owned Python interpreter."
+                "Preparation did not create the worktree-owned Python interpreter."
             )
         probed = await run_contained(
             ctx,

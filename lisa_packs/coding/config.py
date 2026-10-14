@@ -30,12 +30,20 @@ class CodingCheck(BaseModel):
 
 
 class CodingPreparationRecipe(BaseModel):
-    """One finite, session-authorized workspace preparation recipe."""
+    """One finite, session-authorized workspace preparation recipe.
+
+    The prepare command is a session-authored argument vector, exactly like
+    the pack's checks: the pack owns the mechanics (sandbox containment,
+    interpreter probe, baseline evidence), the session owns the toolchain.
+    ``{workspace_python}`` is the only placeholder, resolved like a check's.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: str = Field(min_length=1, max_length=80)
-    manager: Literal["uv"] = "uv"
+    prepare_argv: tuple[str, ...] = Field(min_length=1, max_length=100)
+    #: Modules (import names) that must resolve from the worktree-owned
+    #: interpreter after preparation.
     project_modules: tuple[str, ...] = Field(min_length=1, max_length=20)
     baseline_check_ids: tuple[str, ...] = ()
     timeout_seconds: int = Field(default=600, ge=1, le=1800)
