@@ -39,13 +39,28 @@ if pathlib.Path(sys.executable).absolute() != python.absolute():
     raise RuntimeError('interpreter is not the worktree-owned virtual environment')
 origins = {}
 for name in sys.argv[2:]:
-    origin = getattr(importlib.import_module(name), '__file__', None)
-    if not origin:
-        raise RuntimeError(f'module has no import origin: {name}')
-    resolved = pathlib.Path(origin).resolve()
-    if not resolved.is_relative_to(root):
-        raise RuntimeError(f'module resolves outside worktree: {name} -> {resolved}')
-    origins[name] = str(resolved)
+    module = importlib.import_module(name)
+    origin = getattr(module, '__file__', None)
+    if origin:
+        resolved = pathlib.Path(origin).resolve()
+        if not resolved.is_relative_to(root):
+            raise RuntimeError(f'module resolves outside worktree: {name} -> {resolved}')
+        origins[name] = str(resolved)
+    else:
+        # A PEP 420 namespace package has no __init__.py, so __file__ stays
+        # unset and __path__ is the merged list of every sys.path entry the
+        # finder resolved the name into. (Real case: the Lisa workspace's
+        # 'sdk' spans one editable install per distribution; with no
+        # __file__ the honest provenance is the directory list.) Certify
+        # every entry — a single outside entry means part of the namespace
+        # resolves somewhere the worktree does not own.
+        paths = [pathlib.Path(p).resolve() for p in getattr(module, '__path__', ())]
+        if not paths:
+            raise RuntimeError(f'module has no import origin: {name}')
+        for resolved in paths:
+            if not resolved.is_relative_to(root):
+                raise RuntimeError(f'module resolves outside worktree: {name} -> {resolved}')
+        origins[name] = [str(resolved) for resolved in paths]
 print(json.dumps({'python': str(python), 'origins': origins}, sort_keys=True))
 """
 
