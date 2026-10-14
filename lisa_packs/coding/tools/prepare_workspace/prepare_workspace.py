@@ -111,7 +111,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         )
         worktree = artifact_worktree(artifact, config=config)
         await _require_ignored_runtime_paths(worktree, config=config)
-        manifest_digest = dependency_manifest_digest(worktree, config=config)
+        manifest_digest = dependency_manifest_digest(worktree, recipe=recipe)
         recipe_digest = preparation_recipe_digest(recipe)
         temporary_directory = await run_contained(
             ctx,
@@ -134,21 +134,27 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             detail = prepared.stderr.strip() or prepared.stdout.strip()
             raise CodingWorkflowError(detail or "Preparation command failed")
         python = workspace_python(worktree)
-        if not python.is_file():
+        probes_interpreter = bool(recipe.project_modules)
+        probe_stdout = ""
+        probe_stderr = ""
+        if python.is_file() and probes_interpreter:
+            probed = await run_contained(
+                ctx,
+                (str(python), "-c", _PROBE, str(worktree), *recipe.project_modules),
+                worktree=worktree,
+                timeout_seconds=recipe.timeout_seconds,
+            )
+            if probed.timed_out or probed.return_code != 0:
+                raise CodingWorkflowError(
+                    probed.stderr.strip() or "worktree import provenance probe failed"
+                )
+            json.loads(probed.stdout)
+            probe_stdout = probed.stdout
+            probe_stderr = probed.stderr
+        elif probes_interpreter:
             raise CodingWorkflowError(
                 "Preparation did not create the worktree-owned Python interpreter."
             )
-        probed = await run_contained(
-            ctx,
-            (str(python), "-c", _PROBE, str(worktree), *recipe.project_modules),
-            worktree=worktree,
-            timeout_seconds=recipe.timeout_seconds,
-        )
-        if probed.timed_out or probed.return_code != 0:
-            raise CodingWorkflowError(
-                probed.stderr.strip() or "worktree import provenance probe failed"
-            )
-        json.loads(probed.stdout)
         baseline_tree = await candidate_tree_sha(worktree, config=config)
         baseline_checks: dict[str, WorkProductCheck] = {}
         for check_id in recipe.baseline_check_ids:
@@ -173,12 +179,12 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             recipe_id=recipe.id,
             recipe_digest=recipe_digest,
             dependency_manifest_digest=manifest_digest,
-            environment_path=str(python.parent.parent),
-            python_path=str(python),
+            environment_path=str(python.parent.parent) if python.is_file() else "",
+            python_path=str(python) if python.is_file() else "",
             baseline_tree_sha=baseline_tree,
             baseline_checks=baseline_checks,
-            probe_stdout=probed.stdout,
-            probe_stderr=probed.stderr,
+            probe_stdout=probe_stdout,
+            probe_stderr=probe_stderr,
             completed_at=datetime.now(UTC),
         )
         artifact.checks = {}

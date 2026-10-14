@@ -402,6 +402,7 @@ async def _python_preparation_fixture(
                         "--locked",
                         "--no-cache",
                     ],
+                    "manifest_paths": ["uv.lock"],
                     "project_modules": ["app"],
                     "baseline_check_ids": ["unit"],
                     "timeout_seconds": 60,

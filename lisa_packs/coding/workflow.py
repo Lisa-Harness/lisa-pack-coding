@@ -18,6 +18,7 @@ from kernel.models import ToolExecutionContext
 from sdk.workproducts import WorkProduct, WorkProductStore
 
 from lisa_packs.coding.config import (
+    ARGV_WORKSPACE_PYTHON,
     CodingCheck,
     CodingPackConfig,
     CodingPreparationRecipe,
@@ -52,9 +53,6 @@ __all__ = [
 ]
 
 _GIT_STATUS_PATH_OFFSET = 3
-# The one placeholder session-authored command vectors may use; the pack
-# resolves it, never the model or the session text.
-_ARGV_PLACEHOLDER = "{workspace_python}"
 # Upper bound on reaping and draining once a process group has been killed.
 _KILL_GRACE_SECONDS = 5.0
 # Git must never wait on a human, and read-only commands such as ``status``
@@ -272,7 +270,8 @@ def expand_argv_placeholders(argv: tuple[str, ...], *, worktree: Path) -> tuple[
     """
 
     return tuple(
-        str(workspace_python(worktree)) if part == _ARGV_PLACEHOLDER else part for part in argv
+        str(workspace_python(worktree)) if part == ARGV_WORKSPACE_PYTHON else part
+        for part in argv
     )
 
 
@@ -298,44 +297,48 @@ _MANIFEST_MAX_BYTES = 8 * 1024 * 1024
 _MANIFEST_CHUNK_BYTES = 512 * 1024
 
 
-def dependency_manifest_digest(worktree: Path, *, config: CodingPackConfig) -> str:
-    """Hash the uv manifests that determine the local environment.
+def dependency_manifest_digest(
+    worktree: Path, *, recipe: CodingPreparationRecipe
+) -> str:
+    """Hash the recipe-declared dependency manifests for staleness evidence.
 
-    Streams the hash: manifest size does not bound host memory, and a large
-    committed lock (real repositories reach hundreds of kilobytes) prepares
-    normally instead of tripping the read tool's byte cap.
+    An empty ``manifest_paths`` means the recipe is self-describing: the
+    sentinel is stable and never stale (nothing feeded it). Declared paths
+    are worktree-relative and validated at configuration parse time; a
+    missing file still digests (its absence is evidence, and the error
+    surfaces where it matters — the prepare command itself).
     """
 
     digest = hashlib.sha256()
-    found = False
-    for name in ("pyproject.toml", "uv.lock"):
-        path = worktree / name
-        if not path.is_file():
-            continue
-        size = path.stat().st_size
-        if size > _MANIFEST_MAX_BYTES:
-            raise CodingWorkflowError(f"Dependency manifest exceeds byte limit: {name}")
-        digest.update(name.encode("utf-8"))
+    for raw in recipe.manifest_paths:
+        name = raw.encode("utf-8")
+        digest.update(name)
         digest.update(b"\0")
-        remaining = size
-        with path.open("rb") as stream:
-            while remaining > 0:
-                chunk = stream.read(min(_MANIFEST_CHUNK_BYTES, remaining))
-                if not chunk:
-                    break
-                digest.update(chunk)
-                remaining -= len(chunk)
-        digest.update(b"\0")
-        found = True
-    if not found:
-        raise CodingWorkflowError("No dependency manifest exists in the worktree.")
+        path = worktree / raw
+        if path.is_file():
+            size = path.stat().st_size
+            if size > _MANIFEST_MAX_BYTES:
+                raise CodingWorkflowError(
+                    f"Dependency manifest exceeds byte limit: {raw}"
+                )
+            remaining = size
+            with path.open("rb") as stream:
+                while remaining > 0:
+                    chunk = stream.read(min(_MANIFEST_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+            digest.update(b"\0")
+        else:
+            digest.update(b"absent\0")
     return digest.hexdigest()
 
 
 def preparation_is_current(
     artifact: WorkProduct, *, worktree: Path, config: CodingPackConfig
 ) -> bool:
-    """Require current configuration, manifests, and owned interpreter evidence."""
+    """Require current recipe, manifests, and owned interpreter evidence."""
 
     if not config.preparation_recipes:
         return True
@@ -347,9 +350,15 @@ def preparation_is_current(
         return (
             preparation.recipe_digest == preparation_recipe_digest(recipe)
             and preparation.dependency_manifest_digest
-            == dependency_manifest_digest(worktree, config=config)
-            and Path(preparation.python_path).absolute() == workspace_python(worktree).absolute()
-            and workspace_python(worktree).is_file()
+            == dependency_manifest_digest(worktree, recipe=recipe)
+            and (
+                not recipe.project_modules
+                or (
+                    Path(preparation.python_path).absolute()
+                    == workspace_python(worktree).absolute()
+                    and workspace_python(worktree).is_file()
+                )
+            )
         )
     except (OSError, ValueError, CodingWorkflowError):
         return False

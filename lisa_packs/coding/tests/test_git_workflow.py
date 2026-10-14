@@ -969,7 +969,7 @@ def test_manifest_digest_streams_locks_larger_than_the_read_cap(tmp_path: Path) 
     """A big committed uv.lock prepares instead of tripping the read byte cap.
 
     The lisa harness lock is 572 KB against a 512 KB max_file_bytes read cap;
-    the digest must cover trusted repo manifests of that size and stay stable
+    the digest must cover declared manifests of that size and stay stable
     across streaming boundaries.
     """
 
@@ -979,9 +979,13 @@ def test_manifest_digest_streams_locks_larger_than_the_read_cap(tmp_path: Path) 
     # Larger than the default 512_000 read cap, crossing the 512 KB stream
     # chunks more than once.
     lock.write_bytes(b"# " + b"x" * (600_000 - 2) + b"\n")
-    config = CodingPackConfig(workspace_root=str(root))
+    recipe = CodingPreparationRecipe(
+        id="python-uv",
+        prepare_argv=("uv", "sync", "--locked"),
+        manifest_paths=("uv.lock",),
+    )
 
-    digest = dependency_manifest_digest(root, config=config)
+    digest = dependency_manifest_digest(root, recipe=recipe)
 
     assert len(digest) == 64
     expected = hashlib.sha256()
@@ -992,7 +996,56 @@ def test_manifest_digest_streams_locks_larger_than_the_read_cap(tmp_path: Path) 
     assert digest == expected.hexdigest()
     # A content change flips the digest (staleness evidence stays sensitive).
     lock.write_bytes(lock.read_bytes() + b"# touched\n")
-    assert dependency_manifest_digest(root, config=config) != digest
+    assert dependency_manifest_digest(root, recipe=recipe) != digest
+
+
+def test_manifest_digest_is_recipe_scoped_and_optional(tmp_path: Path) -> None:
+    """Staleness follows the recipe's own manifests, not Python's.
+
+    An npm-style recipe must prepare in a worktree with no uv manifests at
+    all, and a stray legacy pyproject.toml must neither be required nor
+    spuriously stale preparation that never reads it.
+    """
+
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "package.json").write_text('{"name": "node-app"}\n', encoding="utf-8")
+    npm_recipe = CodingPreparationRecipe(
+        id="node-npm",
+        prepare_argv=("npm", "install"),
+        manifest_paths=("package.json",),
+    )
+    node_digest = dependency_manifest_digest(root, recipe=npm_recipe)
+
+    # A legacy Python manifest exists but this recipe never reads it: it
+    # changes nothing.
+    (root / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
+    assert dependency_manifest_digest(root, recipe=npm_recipe) == node_digest
+
+    # Editing the declared manifest flips the digest.
+    (root / "package.json").write_text('{"name": "node-app-b"}\n', encoding="utf-8")
+    assert dependency_manifest_digest(root, recipe=npm_recipe) != node_digest
+
+    # An absent declared manifest hashes as evidence (not an error): the
+    # prepare command itself reports the real failure if the manifest matters.
+    empty = CodingPreparationRecipe(id="bare", prepare_argv=("make", "deps"))
+    self_describing = dependency_manifest_digest(root, recipe=empty)
+    (root / "package.json").unlink()
+    assert dependency_manifest_digest(root, recipe=empty) == self_describing
+    no_paths = CodingPreparationRecipe(
+        id="bare", prepare_argv=("make", "deps"), manifest_paths=()
+    )
+    assert dependency_manifest_digest(root, recipe=no_paths) == self_describing
+
+    # A uv-style recipe whose lock disappears changes its digest (evidence).
+    uv_recipe = CodingPreparationRecipe(
+        id="python-uv",
+        prepare_argv=("uv", "sync", "--locked"),
+        manifest_paths=("pyproject.toml", "uv.lock"),
+    )
+    with_uv = dependency_manifest_digest(root, recipe=uv_recipe)
+    (root / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    assert dependency_manifest_digest(root, recipe=uv_recipe) != with_uv
 
 
 def test_recipe_prepare_argv_is_session_owned_and_digested(tmp_path: Path) -> None:
@@ -1038,6 +1091,67 @@ def test_recipe_prepare_argv_is_session_owned_and_digested(tmp_path: Path) -> No
         ("{workspace_python}", "-c", "print('ok')"), worktree=root
     )
     assert expanded == (str(workspace_python(root)), "-c", "print('ok')")
+
+
+def test_module_free_recipe_relaxes_the_workspace_python_rule(tmp_path: Path) -> None:
+    """The {workspace_python} rule applies exactly when a recipe probes one.
+
+    A Python-shaped recipe (project_modules declared) requires checks to run
+    under the owned interpreter; a toolchain-free recipe (no modules, e.g.
+    npm) leaves checks free-form.
+    """
+
+    root = tmp_path / "source"
+    root.mkdir()
+    node_checks = [{"id": "build", "argv": ["npm", "run", "build"]}]
+    config = CodingPackConfig.model_validate(
+        {
+            "workspace_root": str(root),
+            "checks": node_checks,
+            "preparation_recipes": [
+                {"id": "node-npm", "prepare_argv": ("npm", "install")}
+            ],
+        }
+    )
+    assert config.preparation_recipes[0].project_modules == ()
+
+    # A module-declaring recipe keeps the strict rule: refusing it is loud.
+    with pytest.raises(ValidationError, match="workspace_python"):
+        CodingPackConfig.model_validate(
+            {
+                "workspace_root": str(root),
+                "checks": node_checks,
+                "preparation_recipes": [
+                    {
+                        "id": "python-uv",
+                        "prepare_argv": ("uv", "sync", "--locked"),
+                        "project_modules": ["app"],
+                    }
+                ],
+            }
+        )
+
+
+def test_recipe_manifest_paths_must_be_worktree_relative(tmp_path: Path) -> None:
+    """Traversal and absolute paths are configuration errors, loudly."""
+
+    root = tmp_path / "source"
+    root.mkdir()
+    for bad in ("/etc/passwd", "../outside.lock"):
+        with pytest.raises(ValidationError, match="manifest path"):
+            CodingPackConfig.model_validate(
+                {
+                    "workspace_root": str(root),
+                    "checks": [{"id": "unit", "argv": [sys.executable, "-c", "print('ok')"]}],
+                    "preparation_recipes": [
+                        {
+                            "id": "python-uv",
+                            "prepare_argv": ("uv", "sync", "--locked"),
+                            "manifest_paths": (bad,),
+                        }
+                    ],
+                }
+            )
 
 
 def test_recipe_with_unknown_baseline_check_fails_validation(tmp_path: Path) -> None:
