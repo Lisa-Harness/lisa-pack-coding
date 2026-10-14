@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import shutil
 import sys
 from collections.abc import Callable, Mapping
@@ -1019,6 +1020,121 @@ async def test_structured_edits_require_fresh_hashes_and_validate_as_a_batch(
         )
     )
     assert "File changed since it was read" in stale.error
+
+
+def _string_edits_payload(edits: list[dict[str, object]]) -> str:
+    """Serialize an edits list the way the incident provider did: JSON inside a string."""
+
+    return json.dumps(edits, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_string_typed_edits_decode_to_the_underlying_list(tmp_path: Path) -> None:
+    """A string-typed ``edits`` payload that wraps a complete JSON array applies.
+
+    Regression guard for the 2026-10-14 incident: some providers serialize the
+    array into a JSON string inside the arguments object, every call failing
+    with ``edits → Input should be a valid list`` until the model gave up.
+    """
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "string edits"}))
+    artifact_id = created.output_json["artifact_id"]
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    digest = hashlib.sha256(b"hello\n").hexdigest()
+    edits = _string_edits_payload(
+        [
+            {
+                "kind": "update",
+                "path": "app.txt",
+                "expected_sha256": digest,
+                "replacements": [{"old_text": "hello", "new_text": "hello edited"}],
+            }
+        ]
+    )
+
+    edited = await edit_files(_context(root, store, {"artifact_id": artifact_id, "edits": edits}))
+
+    assert edited.error == "", edited.error
+    assert Path(artifact.worktree_path, "app.txt").read_text(encoding="utf-8") == (
+        "hello edited\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_truncated_string_edits_are_completed_faithfully(tmp_path: Path) -> None:
+    """A truncated string payload with missing tail closers is completed and applied.
+
+    The incident payloads opened ``[{`` twice but closed only ``}]`` — appending
+    the missing ``}]`` recovers exactly the intended array. Refusals stay
+    refusals: garbage never becomes a list, and the pydantic error still names
+    the real shape.
+    """
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "truncated"}))
+    artifact_id = created.output_json["artifact_id"]
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    digest = hashlib.sha256(b"hello\n").hexdigest()
+    complete_form = json.dumps(
+        [
+            {
+                "kind": "update",
+                "path": "app.txt",
+                "expected_sha256": digest,
+                "replacements": [{"old_text": "hello", "new_text": "hello edited"}],
+            }
+        ],
+        ensure_ascii=False,
+    )
+    # Cut the closing "}] of the (replacement object + replacements array)
+    # exactly like the incident payloads: structure opens [{ twice under the
+    # outer array but the under-layer ends after the replacement text.
+    truncation_point = complete_form.rindex("hello edited")
+    truncated = complete_form[: truncation_point + len("hello edited")]
+
+    edited = await edit_files(
+        _context(root, store, {"artifact_id": artifact_id, "edits": truncated})
+    )
+
+    assert edited.error == "", edited.error
+    assert Path(artifact.worktree_path, "app.txt").read_text(encoding="utf-8") == (
+        "hello edited\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unparseable_string_edits_fail_with_the_real_shape_error(
+    tmp_path: Path,
+) -> None:
+    """Strings that cannot be decoded as an edit array keep the pydantic error."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "garbage"}))
+    artifact_id = created.output_json["artifact_id"]
+
+    rejected = await edit_files(
+        _context(root, store, {"artifact_id": artifact_id, "edits": "not even json"})
+    )
+
+    assert "should be a valid list" in rejected.error
+
+    trailing_comma = '[{"kind":"create","path":"x.txt","content":"y",'
+    rejected_comma = await edit_files(
+        _context(root, store, {"artifact_id": artifact_id, "edits": trailing_comma})
+    )
+    assert "should be a valid list" in rejected_comma.error
+
+    object_string = '{"kind":"update"}'
+    rejected_object = await edit_files(
+        _context(root, store, {"artifact_id": artifact_id, "edits": object_string})
+    )
+    assert "should be a valid list" in rejected_object.error
 
 
 @pytest.mark.parametrize(
