@@ -36,9 +36,10 @@ class Parameters(BaseModel):
     op: Literal["tag", "tag_delete", "restore", "reword", "squash", "rebase"]
     #: Tag name for ``tag``/``tag_delete``; the full checkpoint tag for ``restore``.
     name: str = Field(default="", max_length=200)
-    #: 40-hex commit: tag target, squash ``upto`` commit (default: the base),
-    #: or rebase ``new_base``.
-    target: str = Field(default="", pattern=r"^$|^[0-9a-f]{40}$")
+    #: Tag/squash target (owned commit) or rebase ``new_base``; accepts any
+    #: Git revision expression (SHA, branch, tag, HEAD) resolved to the
+    #: canonical commit before the range guards compare it.
+    target: str = Field(default="", max_length=200)
     #: Required message for ``squash``/``reword`` and for annotated ``tag``.
     message: str = ""
     #: Create an annotated tag (requires ``message``).
@@ -401,6 +402,10 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
                 )
             if head == base:
                 raise CodingWorkflowError("No owned commits exist to rebase.")
+            # The target is resolved in the worktree (whose object store is
+            # shared with the source checkout), so branch names like the
+            # source's default branch resolve to its current tip exactly like
+            # create_worktree/import_commit resolve revision expressions.
             new_base = await _resolve_commit(
                 worktree, config, params.target, label="rebase base commit"
             )

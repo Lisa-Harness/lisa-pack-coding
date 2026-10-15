@@ -1,4 +1,9 @@
-"""Inspect the durable and Git status of an owned coding worktree."""
+"""Inspect the durable and Git status of an owned coding worktree.
+
+Also resolves the source checkout's current tip and reports it beside the
+artifact's base so base drift is visible; a drifted artifact with a commit
+gets an explicit prompt to rebase promptly.
+"""
 
 from __future__ import annotations
 
@@ -28,6 +33,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     params = Parameters.model_validate(ctx.parameters)
     try:
         config = get_coding_config(ctx)
+        source_root = config.resolve_workspace_root()
         artifact = await load_owned_artifact(
             ctx,
             artifact_id=params.artifact_id,
@@ -48,22 +54,63 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
                 or diff.stderr.strip()
                 or "git status failed"
             )
+        source_head = await run_git(source_root, ("rev-parse", "HEAD"), config=config)
+        source_branch = await run_git(
+            source_root, ("branch", "--show-current"), config=config
+        )
+        if source_head.return_code != 0 or source_branch.return_code != 0:
+            raise CodingWorkflowError(
+                source_head.stderr.strip()
+                or source_branch.stderr.strip()
+                or "Cannot resolve the source checkout tip."
+            )
+        source_head_sha = source_head.stdout.strip()
+        source_branch_name = source_branch.stdout.strip()
+        ahead = False
+        if artifact.base_sha and artifact.base_sha != source_head_sha:
+            ancestor = await run_git(
+                source_root,
+                ("merge-base", "--is-ancestor", artifact.base_sha, source_head_sha),
+                config=config,
+            )
+            if ancestor.return_code not in (0, 1):
+                raise CodingWorkflowError(
+                    ancestor.stderr.strip() or "git merge-base --is-ancestor failed"
+                )
+            ahead = ancestor.return_code == 0
     except (CodingWorkflowError, OSError, ValueError) as exc:
         return ToolResult(tool_id=TOOL_ID, error=str(exc))
 
+    text = (
+        f"Artifact {artifact.artifact_id} is {artifact.status} at revision "
+        f"{artifact.revision}."
+    )
+    if ahead and artifact.commit_sha:
+        source_label = (
+            f"source branch {source_branch_name}"
+            if source_branch_name
+            else "source checkout"
+        )
+        text += (
+            f" The {source_label} has moved ahead of the artifact base "
+            f"{artifact.base_sha}; rebase promptly onto {source_head_sha} with "
+            "coding_history (op=rebase)."
+        )
+
     return ToolResult(
         tool_id=TOOL_ID,
-        output_text=(
-            f"Artifact {artifact.artifact_id} is {artifact.status} at revision "
-            f"{artifact.revision}."
-        ),
+        output_text=text,
         output_json={
             "artifact_id": artifact.artifact_id,
             "status": artifact.status,
             "revision": artifact.revision,
             "branch": artifact.branch,
             "commit_sha": artifact.commit_sha,
+            "base_sha": artifact.base_sha,
             "pushed_sha": artifact.pushed_sha,
+            "source_head_sha": source_head_sha,
+            "source_head_branch": source_branch_name,
+            "source_ahead_of_base": ahead,
             "git_status": status.stdout.strip() or "(clean)",
             "git_diff_stat": diff_stat.stdout.strip() or "(no diff)",
             "git_diff": diff.stdout,

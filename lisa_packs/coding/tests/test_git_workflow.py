@@ -2702,6 +2702,132 @@ async def test_history_rebase_conflict_aborts_and_preserves_branch(
 
 
 @pytest.mark.asyncio
+async def test_history_rebase_accepts_branch_name_target(tmp_path: Path) -> None:
+    """The rebase target is a revision expression; a branch name resolves to its tip."""
+
+    root = await _repository(tmp_path)
+    (root / "upstream.txt").write_text("origin\n", encoding="utf-8")
+    await _git(root, "add", "upstream.txt")
+    await _git(root, "commit", "-m", "upstream base")
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "rebase-branch"}))
+    artifact_id = created.output_json["artifact_id"]
+    await _commit_artifact(
+        root, store, artifact_id, patch=_APP_PATCH, message="owned work"
+    )
+    worktree = Path(created.output_json["worktree_path"])
+
+    # Advance the source branch: the default-branch tip is what drifts.
+    (root / "upstream.txt").write_text("origin\nupdate\n", encoding="utf-8")
+    await _git(root, "add", "upstream.txt")
+    await _git(root, "commit", "-m", "upstream evolves")
+    tip = (await _git_out(root, "rev-parse", "HEAD")).strip()
+
+    # The target arrives as the source branch name, not a 40-hex SHA.
+    rebased = await history(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "op": "rebase", "target": "main"},
+        )
+    )
+    assert rebased.error == "", rebased.error
+    assert rebased.output_json["new_base_sha"] == tip
+    artifact = await store.get(artifact_id)
+    assert artifact.base_sha == tip
+    assert "upstream evolves" in (await _git_out(worktree, "log", "--format=%s"))
+    assert (await _git_out(worktree, "branch", "--show-current")).strip() == (
+        "lisa/rebase-branch"
+    )
+
+
+@pytest.mark.asyncio
+async def test_status_surfaces_source_tip_drift_and_rebase_prompt(
+    tmp_path: Path,
+) -> None:
+    """Status reports the source tip beside the base and prompts a timely rebase."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "drift-watch"}))
+    artifact_id = created.output_json["artifact_id"]
+    base_sha = created.output_json["base_sha"]
+
+    # No drift yet: the source tip still equals the base.
+    current = await status(_context(root, store, {"artifact_id": artifact_id}))
+    assert current.error == "", current.error
+    assert current.output_json["base_sha"] == base_sha
+    assert current.output_json["source_head_sha"] == base_sha
+    assert current.output_json["source_head_branch"] == "main"
+    assert current.output_json["source_ahead_of_base"] is False
+    assert "rebase" not in current.output_text
+
+    head = await _commit_artifact(
+        root, store, artifact_id, patch=_APP_PATCH, message="owned work"
+    )
+    # Advance the source branch past the artifact base.
+    (root / "upstream.txt").write_text("origin\nupdate\n", encoding="utf-8")
+    await _git(root, "add", "upstream.txt")
+    await _git(root, "commit", "-m", "upstream evolves")
+    tip = (await _git_out(root, "rev-parse", "HEAD")).strip()
+
+    drifted = await status(_context(root, store, {"artifact_id": artifact_id}))
+    assert drifted.output_json["source_head_sha"] == tip
+    assert drifted.output_json["source_head_sha"] != drifted.output_json["base_sha"]
+    assert drifted.output_json["source_ahead_of_base"] is True
+    assert f"{tip}" in drifted.output_text
+    assert "op=rebase" in drifted.output_text
+
+    # The prompted rebase closes the drift with the surfaced tip directly.
+    rebased = await history(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "op": "rebase",
+                "target": drifted.output_json["source_head_sha"],
+            },
+        )
+    )
+    assert rebased.error == "", rebased.error
+    assert rebased.output_json["new_base_sha"] == tip
+    assert rebased.output_json["commit_sha"] != head
+
+    # After rebase the source tip equals the new base again.
+    fresh = await status(_context(root, store, {"artifact_id": artifact_id}))
+    assert fresh.output_json["source_ahead_of_base"] is False
+    assert fresh.output_json["base_sha"] == tip
+    assert "op=rebase" not in fresh.output_text
+
+
+@pytest.mark.asyncio
+async def test_status_reports_no_drift_for_unrelated_source_history(
+    tmp_path: Path,
+) -> None:
+    """A source tip that is not a descendant of the base is not flagged as drift."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "orphan-watch"}))
+    artifact_id = created.output_json["artifact_id"]
+
+    # Move the source checkout to a sibling root: not a descendant of the base.
+    await _git(root, "checkout", "--orphan", "side")
+    await _git(root, "rm", "-rf", "--ignore-unmatch", "-q", ".")
+    (root / "side.txt").write_text("side\n", encoding="utf-8")
+    await _git(root, "add", "side.txt")
+    await _git(root, "commit", "-m", "orphan tip")
+    tip = (await _git_out(root, "rev-parse", "HEAD")).strip()
+
+    inspected = await status(_context(root, store, {"artifact_id": artifact_id}))
+    assert inspected.error == "", inspected.error
+    assert inspected.output_json["source_head_sha"] == tip
+    assert inspected.output_json["source_ahead_of_base"] is False
+    assert "op=rebase" not in inspected.output_text
+
+
+@pytest.mark.asyncio
 async def test_history_restore_rewinds_to_checkpoint(tmp_path: Path) -> None:
     """Restore rewinds committed history to a tagged checkpoint and back."""
 

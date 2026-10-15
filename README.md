@@ -51,11 +51,11 @@ owned worktree, never the source checkout.
 | `coding_prepare_workspace` | write | ✓ | Run the session-configured preparation command (an argument vector in `preparation_recipes`, like a check's `argv`; `{workspace_python}` resolves to the worktree's owned interpreter) in the owned sandbox and record preparation evidence. Checks refuse to run until preparation is current. |
 | `coding_run_check` | write | ✓ | Run one named check through the bwrap owner's direct-write sandbox floor. Result records the current revision and candidate-tree hash; no host fallback. A `verify` check that rewrites files fails and its edits are reverted; a `fix` check's edits become a new revision (like a patch) and stale the other checks. |
 | `coding_commit` | write | ✓ | Stage commit candidates and commit only after required checks passed for this revision and tree, on the owned unprotected branch. The message may be any length and span multiple lines. Committing clears pending `imported_commits` state (the imported content is carried by the commit). |
-| `coding_history` | write | ✓ | Slice and dice the owned branch's committed history: `tag`/`tag_delete` (owned commits only), `restore` (rewind to any existing tag's commit, including `<branch_prefix>ckpt/` checkpoints), `reword`, `squash` (fold owned commits into one; `target` keeps everything at or below it as a parent), or `rebase` (`--onto` a new base, auto-abort on conflict). Every rewrite first tags a checkpoint; a rewrite that leaves the tree byte-identical keeps recorded checks, any content change clears them. Refuses rewrites of already-pushed commits; protected branches and the source checkout are untouchable. |
+| `coding_history` | write | ✓ | Slice and dice the owned branch's committed history: `tag`/`tag_delete` (owned commits only), `restore` (rewind to any existing tag's commit, including `<branch_prefix>ckpt/` checkpoints), `reword`, `squash` (fold owned commits into one; `target` keeps everything at or below it as a parent), or `rebase` (`--onto` a new base given as any Git revision — SHA or branch name — auto-abort on conflict; use it as soon as the source tip moves past the artifact base). Every rewrite first tags a checkpoint; a rewrite that leaves the tree byte-identical keeps recorded checks, any content change clears them. Refuses rewrites of already-pushed commits; protected branches and the source checkout are untouchable. |
 | `coding_push` | external_write | ✓ | Push the checked feature branch upstream (`push_remote`). **No force option exists.** |
 | `coding_export_patches` | write | ✓ | Write `base_sha..commit_sha` as a `git format-patch --base` series to `<patch_export_dir or source-parent/.lisa-patches>/<id>/` (outside the source tree, enforced) and return the `git am -3` command. Re-export replaces the prior series; works after cleanup. |
 | `coding_cleanup_worktree` | write | ✓ | Remove a **clean** owned worktree (`git worktree remove`, no force). |
-| `coding_status` | read | — | Report git status/diff + check state for an artifact without mutating it. |
+| `coding_status` | read | — | Report git status/diff + check state for an artifact without mutating it, plus the source checkout's current tip (`source_head_sha`, `source_head_branch`) beside the artifact's `base_sha` with a `source_ahead_of_base` flag — so base drift is visible and the worktree can be rebased onto the source tip promptly (`coding_history` `op=rebase`). |
 
 ### Read tools (source workspace or owned worktree)
 
@@ -133,6 +133,19 @@ commit, then in your own checkout run the returned command, e.g.
 `git am -3 ~/Code/.lisa-patches/<id>/*.patch`. The series keeps authorship,
 messages, and a `base-commit:` trailer, so `-3` can fall back to a three-way
 merge if your branch has moved on.
+
+### Rebasing onto the source tip
+
+A worktree branches at the source `HEAD` frozen at creation; upstream commits
+keep landing on the default branch and drift accumulates quietly. The loop
+that keeps an owned branch mergeable is **check drift → rebase early**:
+`coding_status` reports the source checkout's current tip beside the artifact
+base, and when the tip has moved past the base the model is prompted to rebase
+(`coding_history` with `op=rebase` and the tip as `target` — a SHA or a branch
+name; both resolve to the canonical commit). Rebasing replays the owned
+commits with `--empty=drop`, aborts cleanly on conflict, checkpoints the old
+head first, and refuses to rewrite pushed commits — so rebasing early is safe
+and cheap, exactly when reconciling with upstream is easiest.
 
 Every artifact is a **`WorkProduct`** (`sdk.workproducts`) carrying a six-field
 host identity — `workspace_id`, `user_id`, `user_slug`, `surface_type`,

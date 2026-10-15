@@ -112,3 +112,19 @@ For code-change tasks, finish only after the owned worktree has a real commit
 with all configured required checks passing on the committed content. Report
 missing approvals, failed checks, or a blocked commit instead of claiming
 completion.
+
+## Rebase onto the source tip early
+
+The worktree branches at the source `HEAD` frozen at creation time; the source
+checkout keeps moving (new commits land on the default branch). Treat rebasing
+as routine maintenance, not a last resort: `coding_status` reports the source
+checkout's current tip (`source_head_sha`) beside the artifact's base
+(`base_sha`), and when the source tip has moved past the base it says so
+outright. As soon as you see that drift — ideally before your next edit, and
+always before a final commit — run `coding_history` with
+`op=rebase, target=<source_head_sha>` (the target also accepts a branch name).
+Rebasing late stacks up drift and latent merge conflicts; rebasing after every
+few source commits keeps the owned branch a small, clean delta that merges
+without surprises. A conflicting rebase aborts on its own and leaves the
+branch and checkpoint exactly where they were, so an early rebase failure
+costs nothing.
