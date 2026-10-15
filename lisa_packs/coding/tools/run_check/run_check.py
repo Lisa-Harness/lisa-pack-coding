@@ -16,10 +16,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kernel.models import ToolExecutionContext, ToolResult
+from pydantic import BaseModel, Field
+from sdk.workproducts import WorkProductCheck, WorkProductCheckStatus
+
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.local_files import CodingPathError, resolve_relative_path_at_root
 from lisa_packs.coding.workflow import (
     CodingWorkflowError,
+    ProcessResult,
     artifact_worktree,
     candidate_tree_sha,
     expand_check_argv,
@@ -30,8 +34,6 @@ from lisa_packs.coding.workflow import (
     tree_changes,
     worktree_tree_sha,
 )
-from pydantic import BaseModel, Field
-from sdk.workproducts import WorkProductCheck, WorkProductCheckStatus
 
 TOOL_ID = "coding_run_check"
 
@@ -41,6 +43,26 @@ class Parameters(BaseModel):
 
     artifact_id: str = Field(min_length=1, max_length=100)
     check_id: str = Field(min_length=1, max_length=80)
+
+
+_FAILURE_EXCERPT_BYTES = 2000
+
+
+def _failure_excerpt(result: ProcessResult, *, status: WorkProductCheckStatus) -> str:
+    """Return the tail of a failed check's output, so the diagnosis travels.
+
+    A bare status JSON proved useless in practice: models reread the run
+    without the cause ("Failed to download ..." vs. a genuine test failure)
+    and burned iterations re-deriving it. Keep the excerpt bounded and only
+    attach it when the check actually failed.
+    """
+
+    if status == "passed" or not (result.stdout or result.stderr):
+        return ""
+    combined = result.stderr.strip() + "\n" + result.stdout.strip()
+    if len(combined) > _FAILURE_EXCERPT_BYTES:
+        combined = "…\n" + combined[-_FAILURE_EXCERPT_BYTES:]
+    return f"\n\nFailure output:\n{combined.strip()}"
 
 
 def _editable(worktree: Path, paths: list[str]) -> bool:
@@ -59,7 +81,9 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     params = Parameters.model_validate(ctx.parameters)
     try:
         config = get_coding_config(ctx)
-        check = next((item for item in config.checks if item.id == params.check_id), None)
+        check = next(
+            (item for item in config.checks if item.id == params.check_id), None
+        )
         if check is None:
             configured = ", ".join(f"'{item.id}'" for item in config.checks) or "none"
             raise CodingWorkflowError(
@@ -78,21 +102,29 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             )
 
         started = time.perf_counter()
-        before = await worktree_tree_sha(worktree, config=config, paths=artifact.changed_paths)
+        before = await worktree_tree_sha(
+            worktree, config=config, paths=artifact.changed_paths
+        )
         result = await run_contained(
             ctx,
             expand_check_argv(check, worktree=worktree),
             worktree=worktree,
             timeout_seconds=check.timeout_seconds,
         )
-        after = await worktree_tree_sha(worktree, config=config, paths=artifact.changed_paths)
-        changes = await tree_changes(worktree, config=config, before=before, after=after)
+        after = await worktree_tree_sha(
+            worktree, config=config, paths=artifact.changed_paths
+        )
+        changes = await tree_changes(
+            worktree, config=config, before=before, after=after
+        )
         elapsed = time.perf_counter() - started
         succeeded = not result.timed_out and result.return_code == 0
         changed = [path for _, path in changes]
         keep = check.kind == "fix" and succeeded and _editable(worktree, changed)
         if changes and not keep:
-            await restore_tree_paths(worktree, config=config, tree=before, changes=changes)
+            await restore_tree_paths(
+                worktree, config=config, tree=before, changes=changes
+            )
             if check.kind == "verify":
                 raise CodingWorkflowError(
                     f"Check '{check.id}' modified {', '.join(changed)}; the edits were "
@@ -106,14 +138,20 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         fixed_paths = changed if keep else []
         if fixed_paths:
             artifact.revision += 1
-            artifact.changed_paths = list(dict.fromkeys([*artifact.changed_paths, *fixed_paths]))
+            artifact.changed_paths = list(
+                dict.fromkeys([*artifact.changed_paths, *fixed_paths])
+            )
             artifact.checks = {}
             artifact.status = "patched"
         candidate_tree = await candidate_tree_sha(
             worktree, config=config, paths=artifact.changed_paths or None
         )
         status: WorkProductCheckStatus = (
-            "timed_out" if result.timed_out else "passed" if result.return_code == 0 else "failed"
+            "timed_out"
+            if result.timed_out
+            else "passed"
+            if result.return_code == 0
+            else "failed"
         )
         record = WorkProductCheck(
             check_id=check.id,
@@ -139,7 +177,8 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             " rerun the other checks."
             if fixed_paths
             else ""
-        ),
+        )
+        + _failure_excerpt(result, status=status),
         output_json={
             "artifact_id": artifact.artifact_id,
             "check_id": check.id,

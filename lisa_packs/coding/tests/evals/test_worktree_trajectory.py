@@ -375,6 +375,18 @@ async def _python_preparation_fixture(
             "    def test_greeting(self):\n"
             '        self.assertEqual(greeting(), "hello")\n'
         ),
+        # A PEP 420 namespace package: no __init__.py, so the interpreter
+        # exposes it through __path__ alone and __file__ stays unset. The
+        # probe must certify namespace members or workspaces whose own
+        # source layout is a namespace (the Lisa workspace's sdk) can
+        # never prepare.
+        "nsspace/mod.py": "VALUE = 1\n",
+        "test_nsspace_imports.py": (
+            "import unittest\nimport nsspace.mod\n\n"
+            "class NamespaceImportTest(unittest.TestCase):\n"
+            "    def test_imports(self):\n"
+            "        self.assertEqual(nsspace.mod.VALUE, 1)\n"
+        ),
     }
     for path, text in files.items():
         await repo.commit_file(path, text, f"seed {path}")
@@ -394,7 +406,16 @@ async def _python_preparation_fixture(
             "preparation_recipes": [
                 {
                     "id": "python-uv",
-                    "project_modules": ["app"],
+                    "prepare_argv": [
+                        "env",
+                        "TMPDIR=.lisa-tmp",
+                        "uv",
+                        "sync",
+                        "--locked",
+                        "--no-cache",
+                    ],
+                    "manifest_paths": ["uv.lock"],
+                    "project_modules": ["app", "nsspace"],
                     "baseline_check_ids": ["unit"],
                     "timeout_seconds": 60,
                 }
@@ -415,7 +436,11 @@ async def _assert_python_preparation(
     assert preparation.status == "ready"
     assert preparation.recipe_digest and preparation.dependency_manifest_digest
     assert preparation.python_path == str(worktree / ".venv" / "bin" / "python")
-    assert json.loads(preparation.probe_stdout)["origins"] == {"app": str(worktree / "app.py")}
+    probe_origins = json.loads(preparation.probe_stdout)["origins"]
+    assert probe_origins["app"] == str(worktree / "app.py")
+    # A PEP 420 namespace project module has no __file__; the probe certifies
+    # its merged __path__ entries (here only the worktree's own source dir).
+    assert probe_origins["nsspace"] == [str(worktree / "nsspace")]
     assert preparation.baseline_checks["unit"].status == "passed"
     assert preparation.baseline_checks["unit"].checked_tree_sha == preparation.baseline_tree_sha
     assert artifact.checks == {}

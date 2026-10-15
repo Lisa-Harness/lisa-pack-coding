@@ -1,7 +1,7 @@
 tool_id: coding_prepare_workspace
 pack_id: lisa-pack-coding
-description: "Prepare an owned worktree using one finite session-configured Python/uv recipe, then verify the local interpreter and project import origins."
+description: "Prepare an owned worktree with one finite session-configured preparation command, then verify the local interpreter and project import origins."
 exportable: true
 effect: write
 approval_required: true
-approval_preview: "prepare a configured Python/uv environment in the owned worktree"
+approval_preview: "prepare the configured environment in the owned worktree"

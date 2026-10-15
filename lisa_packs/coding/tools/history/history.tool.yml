@@ -1,0 +1,7 @@
+tool_id: coding_history
+pack_id: lisa-pack-coding
+description: "Rewrite owned committed branch history with bounded ops: tag or tag_delete (tags on owned commits only), restore (rewind to any existing tag's commit, including checkpoint tags under <branch_prefix>ckpt/), reword (amend the head commit message), squash (fold owned commits into one, optionally keeping everything at or below an owned upto commit), or rebase (replay owned commits onto a new base commit, aborting on conflict). Every rewrite first tags a checkpoint; tree-preserving rewrites keep recorded checks, content-changing ones clear them. Requires a committed, tracked-clean owned worktree; refuses to rewrite already-pushed commits and never touches the source checkout or protected branches."
+exportable: true
+effect: write
+approval_required: true
+approval_preview: "rewrite owned branch history, tags, or commit messages"

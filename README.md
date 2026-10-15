@@ -43,14 +43,15 @@ owned worktree, never the source checkout.
 
 | Tool | Effect | Approval | Role |
 | --- | --- | --- | --- |
-| `coding_create_worktree` | write | ✓ | Mint a task-bound artifact + `git worktree add` an isolated branch at the source `HEAD` (or at `import_commit`'s commit's parent when given — `import_commit` accepts any Git revision: full or short SHA, branch, tag, or HEAD, resolved to the full SHA). Pass `name` (e.g. `auth-refactor`) for the branch `<prefix><name>` and worktree `<worktree-dir>/<name>`; without one a short random id is used. Name clashes and protected slugs fail fast. Worktree lives **outside** the source tree, enforced. |
+| `coding_create_worktree` | write | ✓ | Mint a task-bound artifact + `git worktree add` an isolated branch at the source `HEAD` (or at `import_commit`'s parent when given). Pass `name` (e.g. `auth-refactor`) for the branch `<prefix><name>` and worktree `<worktree-dir>/<name>`; without one a short random id is used. Name clashes and protected slugs fail fast. Worktree lives **outside** the source tree, enforced. |
 | `coding_list_worktrees` | read | — | List the session's owned worktrees for this workspace (branch, path, `artifact_id`, status, revision, summary) so the model can name, find, and reuse them. |
 | `coding_edit_files` | write | ✓ | Preferred editor: apply exact, hash-guarded replacements, creates, or deletes as one revision. Replacements match the original snapshot and must not overlap. The tool generates and prevalidates the Git patch, preserving supplied content and EOF newlines. |
 | `coding_apply_patch` | write | ✓ | Fallback for existing unified diffs: prevalidate (`git apply --check`) and apply a bounded patch. Bumps `revision`, records `changed_paths`, **clears `checks`** (stale results are invalidated). |
-| `coding_import_commits` | write | ✓ | Replay one already-merged upstream commit onto the owned worktree: the worktree must be created with `import_commit` (base = that commit's parent; any Git revision form matching the creation anchor), the commit's diff applies as one patch revision, and `checks` are cleared. Rejects re-import before a commit/export, base drift, and empty commits. |
-| `coding_prepare_workspace` | write | ✓ | Run a configured locked Python/uv preparation recipe in the owned sandbox and record preparation evidence. |
+| `coding_import_commits` | write | ✓ | Replay one already-merged upstream commit onto the owned worktree: the worktree must be created with `import_commit` (base = that commit's parent), the commit's diff applies as one patch revision, and `checks` are cleared. Rejects re-import before a commit/export, base drift, and empty commits. |
+| `coding_prepare_workspace` | write | ✓ | Run the session-configured preparation command (an argument vector in `preparation_recipes`, like a check's `argv`; `{workspace_python}` resolves to the worktree's owned interpreter) in the owned sandbox and record preparation evidence. Checks refuse to run until preparation is current. |
 | `coding_run_check` | write | ✓ | Run one named check through the bwrap owner's direct-write sandbox floor. Result records the current revision and candidate-tree hash; no host fallback. A `verify` check that rewrites files fails and its edits are reverted; a `fix` check's edits become a new revision (like a patch) and stale the other checks. |
 | `coding_commit` | write | ✓ | Stage commit candidates and commit only after required checks passed for this revision and tree, on the owned unprotected branch. The message may be any length and span multiple lines. Committing clears pending `imported_commits` state (the imported content is carried by the commit). |
+| `coding_history` | write | ✓ | Slice and dice the owned branch's committed history: `tag`/`tag_delete` (owned commits only), `restore` (rewind to any existing tag's commit, including `<branch_prefix>ckpt/` checkpoints), `reword`, `squash` (fold owned commits into one; `target` keeps everything at or below it as a parent), or `rebase` (`--onto` a new base, auto-abort on conflict). Every rewrite first tags a checkpoint; a rewrite that leaves the tree byte-identical keeps recorded checks, any content change clears them. Refuses rewrites of already-pushed commits; protected branches and the source checkout are untouchable. |
 | `coding_push` | external_write | ✓ | Push the checked feature branch upstream (`push_remote`). **No force option exists.** |
 | `coding_export_patches` | write | ✓ | Write `base_sha..commit_sha` as a `git format-patch --base` series to `<patch_export_dir or source-parent/.lisa-patches>/<id>/` (outside the source tree, enforced) and return the `git am -3` command. Re-export replaces the prior series; works after cleanup. |
 | `coding_cleanup_worktree` | write | ✓ | Remove a **clean** owned worktree (`git worktree remove`, no force). |
@@ -115,9 +116,7 @@ list_worktrees ─▶ create_worktree ─▶ edit_files ─▶ run_check ─▶ 
 ```
 
 Create a worktree anchored at an upstream commit with the optional
-`import_commit` parameter (base = that commit's parent; accepts any Git
-revision — full or short SHA, branch, tag, or HEAD — resolved to the full
-SHA); the companion
+`import_commit` parameter (base = that commit's parent); the companion
 `coding_import_commits` then replays that one commit's diff as an ordinary
 patch revision — the whole verify → commit → push → PR lifecycle carries the
 replayed content like any fresh change (e.g. one PR per already-merged commit).
@@ -204,10 +203,8 @@ where `kind` is `verify` (default) or `fix`),
 (`main`,`master`), `push_remote` (`origin`), `patch_export_dir` (empty →
 `<source-parent>/.lisa-patches`; must be absolute and outside the source),
 `worktree_dir` (empty → `<data-dir>/git-worktrees/<workspace-name>` from the
-host-injected data dir, except that a data dir nested inside the source
-workspace falls back to `<source-parent>/.lisa-worktrees` so the worktree
-always lands outside the source; must be absolute; the resolved worktree
-directory must stay outside the source), and the byte/line/result bounds
+host-injected data dir; must be absolute; the resolved worktree directory must
+stay outside the source), and the byte/line/result bounds
 (`max_file_bytes` 512 000, `max_read_lines` 400, `max_patch_bytes` 200 000,
 `max_command_output_bytes` 100 000, `git_timeout_seconds` 60, …).
 
@@ -299,10 +296,8 @@ resources:
             persistence: direct-write
             network: deny
             paths:
-              # Worktree parent (default <data-dir>/git-worktrees/<workspace-name>,
-              # or <source-parent>/.lisa-worktrees when the data dir is nested
-              # inside the source; set worktree_dir to override) — grant rw so
-              # checks can write there.
+              # Worktree parent (default <data-dir>/git-worktrees/<workspace-name>
+              # unless worktree_dir is set) — grant rw so checks can write there.
               /home/you/.lisa/git-worktrees/my-project: rw
 routing:
   # Optional: route natural-language shell intent elsewhere; this pack is
@@ -441,12 +436,15 @@ version available locally, run from `coding`:
 ```
 
 This dependency-free offline fixture calls `coding_prepare_workspace` through
-real bwrap, checks the owned interpreter and import origins, and records
-baseline evidence. It then exercises hash-guarded edits, failing checks,
-blocked commit, repair, passing checks, commit, and cleanup. Missing ignore
-rules for `.venv/` or `.lisa-tmp/` must fail before creating runtime paths.
-The source checkout is preserved and the successful run writes a JSON
-trajectory under pytest's temporary directory. No model calls or downloads.
+real bwrap, checks the owned interpreter and import origins (regular modules
+through `__file__`; PEP 420 namespace modules through every `__path__` entry —
+a workspace whose own source tree is a namespace, like the Lisa workspace's
+`sdk`, must prepare), and records baseline evidence. It then exercises
+hash-guarded edits, failing checks, blocked commit, repair, passing checks,
+commit, and cleanup. Missing ignore rules for `.venv/` or `.lisa-tmp/` must
+fail before creating runtime paths. The source checkout is preserved and the
+successful run writes a JSON trajectory under pytest's temporary directory.
+No model calls or downloads.
 
 ## How this pack fits the group
 

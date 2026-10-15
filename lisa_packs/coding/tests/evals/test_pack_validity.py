@@ -24,6 +24,7 @@ EXPECTED_TOOLS = {
     "coding_edit_files",
     "coding_export_patches",
     "coding_find_files",
+    "coding_history",
     "coding_import_commits",
     "coding_list_directory",
     "coding_list_worktrees",
