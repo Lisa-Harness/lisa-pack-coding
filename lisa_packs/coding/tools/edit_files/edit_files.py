@@ -12,6 +12,15 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from kernel.models import ToolExecutionContext, ToolResult
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+
 from lisa_packs.coding.config import CodingPackConfig, get_coding_config
 from lisa_packs.coding.local_files import (
     CodingPathError,
@@ -23,14 +32,6 @@ from lisa_packs.coding.workflow import (
     artifact_worktree,
     load_owned_artifact,
     run_git,
-)
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    ValidationError,
-    field_validator,
-    model_validator,
 )
 
 TOOL_ID = "coding_edit_files"
@@ -112,14 +113,95 @@ def _complete_json_payload(text: str) -> str | None:
     return completed
 
 
+def _first_structural_anomaly(text: str) -> int | None:
+    """Index of the first outside-string character that breaks JSON structure.
+
+    Corruption means a closer popping an empty or mismatched bracket stack,
+    or a character that is neither a bracket, whitespace, comma, or colon
+    outside a string. Returns ``None`` when the whole payload walks clean —
+    a pure truncation, which the completion path already handles.
+    """
+
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            stack.append(char)
+        elif char in "]}":
+            if not stack:
+                return index
+            expected = "]" if stack[-1] == "[" else "}"
+            if char != expected:
+                return index
+            stack.pop()
+        elif char not in " \t\r\n,:":
+            return index
+    return None
+
+
+def _repair_corrupt_json_tail(text: str) -> str | None:
+    """Recover a payload whose tail closed in the wrong shape, or refuse.
+
+    The 2026-10-15 15:07 payload intended ``"}` but emitted ``"}]})]`` — the
+    closers doubled up and a stray ``)`` carried over from the Python
+    signature being edited. The faithful repair is narrow:
+
+    - Cut at the *first* structural anomaly. Everything after it must be
+      only closers (``]``/``}``), parentheses, and whitespace — any opener,
+      quote, comma, digit, or letter means real content follows that
+      truncation would silently drop, so the payload is refused.
+    - The truncated prefix must itself be a plausibly-unterminated JSON
+      document under the same scanner the completion path uses (a fully
+      closed prefix plus junk is a different corruption class and stays
+      refused — the model re-issues instead of silently accepting junk).
+    - The caller still ``json.loads`` the repaired string, so anything the
+      cut left syntactically invalid (a mismatched bracket inside the kept
+      text, a dangling escape) fails the parse gate as before.
+    """
+
+    anomaly = _first_structural_anomaly(text)
+    if anomaly is None:
+        return None
+    if not all(
+        char in "])}" or char.isspace() for char in text[anomaly:]
+    ):
+        return None
+    head = text[:anomaly]
+    head_state = _scan_json_tail(head)
+    if head_state is None or head_state.dangling_escape:
+        return None
+    if not head_state.stack and not head_state.string_open:
+        return None
+    completed = head
+    if head_state.string_open:
+        completed += '"'
+    completed += "".join(
+        "]" if opener == "[" else "}" for opener in reversed(head_state.stack)
+    )
+    return completed
+
+
 def _decode_string_edits(value: str) -> list[FileEdit] | None:
     """Decode a model that serialized ``edits`` into a JSON string.
 
     glm-5.3:cloud twice rendered ``edits`` as a JSON-escaped string inside the
     arguments object (2026-10-14 self-review run: 4 of 8 edit calls), once
-    with the under-layer truncated by missing tail closers. The string must
-    parse — directly or after faithful tail completion — as a JSON array
-    of objects; anything else is refused unchanged.
+    with the under-layer truncated by missing tail closers; the 2026-10-15
+    15:07 replay closed in the wrong order (``"}]})]``). The string must
+    parse — directly, after faithful tail completion, or after dropping a
+    corrupt closer-only tail — as a JSON array of objects; anything else is
+    refused unchanged.
     """
 
     candidate = value.strip()
@@ -130,6 +212,8 @@ def _decode_string_edits(value: str) -> list[FileEdit] | None:
         decoded = json.loads(candidate)
     except json.JSONDecodeError:
         completed = _complete_json_payload(candidate)
+        if completed is None:
+            completed = _repair_corrupt_json_tail(candidate)
         if completed is None:
             return None
         try:

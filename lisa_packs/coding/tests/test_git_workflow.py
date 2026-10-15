@@ -1437,6 +1437,58 @@ async def test_truncated_string_edits_are_completed_faithfully(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_wrong_closer_tail_string_edits_are_repaired_faithfully(
+    tmp_path: Path,
+) -> None:
+    """A string payload whose tail closes in the wrong order recovers exactly.
+
+    The 2026-10-15 15:07 incident: the intended tail ``"}` was emitted as
+    ``"}]})]`` — a doubled ``}` swapped for ``]``, plus a stray ``)`` carried
+    from the Python signature being edited. Dropping only the non-structural
+    suffix (the stray bracket) and appending the opener-order closers recovers
+    exactly the intended array; the edit applies.
+    """
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "wrong closer"}))
+    artifact_id = created.output_json["artifact_id"]
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    digest = hashlib.sha256(b"hello\n").hexdigest()
+    complete_form = json.dumps(
+        [
+            {
+                "kind": "update",
+                "path": "app.txt",
+                "expected_sha256": digest,
+                "replacements": [{"old_text": "hello", "new_text": "hello edited"}],
+            }
+        ],
+        ensure_ascii=False,
+    )
+
+    # Reproduce the live payload's tail exactly: the innermost replacement
+    # closes faithfully (text + record }), but the model then emitted the
+    # replacements-array and outer-array closers doubled up with a stray
+    # ``)`` from the Python signature it was editing: ``"}]})]`` instead
+    # of ``"`` ``}`` ``]``.
+    cut = complete_form.rindex('"hello edited"') + len('"hello edited"') - 1
+    corrupted = complete_form[:cut] + '"}]})]'
+    assert corrupted.endswith('hello edited"}]})]')
+    assert corrupted != complete_form
+
+    edited = await edit_files(
+        _context(root, store, {"artifact_id": artifact_id, "edits": corrupted})
+    )
+
+    assert edited.error == "", edited.error
+    assert Path(artifact.worktree_path, "app.txt").read_text(encoding="utf-8") == (
+        "hello edited\n"
+    )
+
+
+@pytest.mark.asyncio
 async def test_unparseable_string_edits_fail_with_the_real_shape_error(
     tmp_path: Path,
 ) -> None:
