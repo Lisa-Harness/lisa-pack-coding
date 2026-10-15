@@ -67,6 +67,9 @@ _READ_ONLY_MODE_TOOLS = {
     "coding_outline_source",
     "coding_status",
     "coding_read_copilot_customizations",
+    # fetch_page is a read (no effect) but opt-in rather than ambient since
+    # the sdk-core ambient re-scope; coding modes list it explicitly.
+    "fetch_page",
 }
 
 
