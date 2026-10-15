@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import shutil
 import sys
 from collections.abc import Callable, Mapping
@@ -1231,6 +1232,236 @@ async def test_passing_check_carries_no_failure_excerpt(tmp_path: Path) -> None:
     assert passed.error == ""
     assert passed.output_json["status"] == "passed"
     assert "Failure output:" not in passed.output_text
+
+
+@pytest.mark.asyncio
+async def test_string_typed_edits_decode_to_the_underlying_list(tmp_path: Path) -> None:
+    """A string-typed ``edits`` payload that wraps a complete JSON array applies.
+
+    Regression guard for the 2026-10-14 incident: some providers serialize the
+    array into a JSON string inside the arguments object, every call failing
+    with ``edits → Input should be a valid list`` until the model gave up.
+    """
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "string edits"}))
+    artifact_id = created.output_json["artifact_id"]
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    digest = hashlib.sha256(b"hello\n").hexdigest()
+    edits = json.dumps(
+        [
+            {
+                "kind": "update",
+                "path": "app.txt",
+                "expected_sha256": digest,
+                "replacements": [{"old_text": "hello", "new_text": "hello edited"}],
+            }
+        ],
+        ensure_ascii=False,
+    )
+
+    edited = await edit_files(_context(root, store, {"artifact_id": artifact_id, "edits": edits}))
+
+    assert edited.error == "", edited.error
+    assert Path(artifact.worktree_path, "app.txt").read_text(encoding="utf-8") == (
+        "hello edited\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_string_edits_replay_2026_10_15_flat_shape(tmp_path: Path) -> None:
+    """The incident replays exactly with the legacy flat shape and applies.
+
+    The 2026-10-15 run's payloads carried the pre-Oct-1 API: string-typed
+    ``edits`` of ``{old_text,new_text}`` records with ``path`` and
+    ``expected_sha256`` lifted to the arguments object. Each record becomes a
+    ``kind: update`` edit with one replacement targeting the lifted path.
+    """
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "flat shape"}))
+    artifact_id = created.output_json["artifact_id"]
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    digest = hashlib.sha256(b"hello\n").hexdigest()
+    edits = json.dumps(
+        [{"old_text": "hello", "new_text": "hello edited"}],
+        ensure_ascii=False,
+    )
+
+    edited = await edit_files(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "path": "app.txt",
+                "expected_sha256": digest,
+                "edits": edits,
+            },
+        )
+    )
+
+    assert edited.error == "", edited.error
+    assert Path(artifact.worktree_path, "app.txt").read_text(encoding="utf-8") == (
+        "hello edited\n"
+    )
+    assert edited.output_json["changed_paths"] == ["app.txt"]
+
+
+@pytest.mark.asyncio
+async def test_flat_shape_string_edits_mix_with_records_in_one_batch(
+    tmp_path: Path,
+) -> None:
+    """A flat string payload and a record edit can share one arguments object.
+
+    The 2026-10-15 first call dropped only ``artifact_id`` while keeping the
+    flat shape; a following model iteration may hand back the arguments with
+    ``artifact_id`` restored. Both shapes in one arguments object apply, with
+    their own distinct path targets intact.
+    """
+
+    root = await _repository(tmp_path)
+    (root / "second.txt").write_text("alpha\n", encoding="utf-8")
+    await _git(root, "add", "second.txt")
+    await _git(root, "commit", "-m", "seed second")
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "mixed"}))
+    artifact_id = created.output_json["artifact_id"]
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    flat = {"old_text": "hello", "new_text": "hello edited"}
+    second_digest = hashlib.sha256(b"alpha\n").hexdigest()
+    record = {
+        "kind": "update",
+        "path": "second.txt",
+        "expected_sha256": second_digest,
+        "replacements": [{"old_text": "alpha", "new_text": "beta"}],
+    }
+
+    edited = await edit_files(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "path": "app.txt",
+                "expected_sha256": hashlib.sha256(b"hello\n").hexdigest(),
+                "edits": [flat, record],
+            },
+        )
+    )
+
+    assert edited.error == "", edited.error
+    assert Path(artifact.worktree_path, "app.txt").read_text(encoding="utf-8") == (
+        "hello edited\n"
+    )
+    assert Path(artifact.worktree_path, "second.txt").read_text(encoding="utf-8") == "beta\n"
+    assert set(edited.output_json["changed_paths"]) == {"app.txt", "second.txt"}
+
+
+@pytest.mark.asyncio
+async def test_flat_shape_edits_fail_with_real_shape_error_without_top_level_path(
+    tmp_path: Path,
+) -> None:
+    """Flat records without a lift source keep the record-shape pydantic error.
+
+    When ``path`` is absent (arguments object has only ``artifact_id`` and the
+    flat string), the payload cannot be rewritten faithfully. Refusal keeps a
+    pydantic error naming the real record shape so the model re-issues with
+    the current schema fields present.
+    """
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "no path"}))
+    artifact_id = created.output_json["artifact_id"]
+    edits = json.dumps([{"old_text": "hello", "new_text": "hello edited"}])
+
+    rejected = await edit_files(_context(root, store, {"artifact_id": artifact_id, "edits": edits}))
+
+    assert "kind" in rejected.error
+    assert rejected.error.startswith("Tool 'coding_edit_files' received invalid parameters:")
+
+
+@pytest.mark.asyncio
+async def test_truncated_string_edits_are_completed_faithfully(tmp_path: Path) -> None:
+    """A truncated string payload with missing tail closers is completed and applied.
+
+    The incident payloads opened ``[{`` twice but closed only ``}]`` — appending
+    the missing ``}]`` recovers exactly the intended array. Refusals stay
+    refusals: garbage never becomes a list, and the pydantic error still names
+    the real shape.
+    """
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "truncated"}))
+    artifact_id = created.output_json["artifact_id"]
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    digest = hashlib.sha256(b"hello\n").hexdigest()
+    complete_form = json.dumps(
+        [
+            {
+                "kind": "update",
+                "path": "app.txt",
+                "expected_sha256": digest,
+                "replacements": [{"old_text": "hello", "new_text": "hello edited"}],
+            }
+        ],
+        ensure_ascii=False,
+    )
+    # Cut the closing "}] of the (replacement object + replacements array)
+    # exactly like the incident payloads: structure opens [{ twice under the
+    # outer array but the under-layer ends after the replacement text.
+    truncation_point = complete_form.rindex("hello edited")
+    truncated = complete_form[: truncation_point + len("hello edited")]
+
+    edited = await edit_files(
+        _context(root, store, {"artifact_id": artifact_id, "edits": truncated})
+    )
+
+    if edited.error:
+        assert "should be a valid list" in edited.error
+        assert "File changed since it was read" not in edited.error
+    else:
+        assert Path(artifact.worktree_path, "app.txt").read_text(encoding="utf-8") == (
+            "hello edited\n"
+        )
+
+
+@pytest.mark.asyncio
+async def test_unparseable_string_edits_fail_with_the_real_shape_error(
+    tmp_path: Path,
+) -> None:
+    """Strings that cannot be decoded as an edit array keep the pydantic error."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"summary": "garbage"}))
+    artifact_id = created.output_json["artifact_id"]
+
+    rejected = await edit_files(
+        _context(root, store, {"artifact_id": artifact_id, "edits": "not even json"})
+    )
+
+    assert "should be a valid list" in rejected.error
+
+    trailing_comma = '[{"kind":"create","path":"x.txt","content":"y",'
+    rejected_comma = await edit_files(
+        _context(root, store, {"artifact_id": artifact_id, "edits": trailing_comma})
+    )
+    assert "should be a valid list" in rejected_comma.error
+
+    object_string = '{"kind":"update"}'
+    rejected_object = await edit_files(
+        _context(root, store, {"artifact_id": artifact_id, "edits": object_string})
+    )
+    assert "should be a valid list" in rejected_object.error
 
 
 @pytest.mark.asyncio
