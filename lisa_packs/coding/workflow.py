@@ -12,12 +12,13 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from kernel.models import ToolExecutionContext
 from sdk.workproducts import WorkProduct, WorkProductStore
 
 from lisa_packs.coding.config import (
+    ARGV_WORKSPACE_PYTHON,
     CodingCheck,
     CodingPackConfig,
     CodingPreparationRecipe,
@@ -35,6 +36,7 @@ __all__ = [
     "candidate_tree_sha",
     "changed_paths",
     "dependency_manifest_digest",
+    "expand_argv_placeholders",
     "expand_check_argv",
     "load_owned_artifact",
     "patch_paths",
@@ -51,6 +53,11 @@ __all__ = [
 ]
 
 _GIT_STATUS_PATH_OFFSET = 3
+# Upper bound on reaping and draining once a process group has been killed.
+_KILL_GRACE_SECONDS = 5.0
+# Git must never wait on a human, and read-only commands such as ``status``
+# must not take the index lock away from the user's own Git or editor.
+_GIT_BACKGROUND_ENV = {"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
 
 
 class CodingWorkflowError(RuntimeError):
@@ -77,72 +84,24 @@ class ReadableRoot:
     artifact_id: str | None = None
 
 
-async def _bounded_drain(
-    task: asyncio.Future[tuple[bytes, bool]],
-    retained: list[bytes],
-) -> tuple[bytes, bool]:
-    """Await one drain task with a final grace bound.
+class _Capture:
+    """Bytes drained from one stream, kept even if the drain is cancelled."""
 
-    A normally-exiting child whose orphaned descendant still holds the pipe
-    write end would otherwise block on the stream EOF forever (the 2026-10-12
-    ``setsid`` daemon wedge: the dnsmasq-web ``RunDaemon`` helper holds the
-    test run's inherited pipes and the check tool waited 47 minutes with no
-    timeout able to fire). Past the grace bound the drain is cancelled and
-    ``retained`` carries whatever byte holder the drain task kept.
-    """
-    try:
-        return await asyncio.wait_for(asyncio.shield(task), timeout=5)
-    except (TimeoutError, asyncio.CancelledError):
-        if task.cancelled():
-            return b"", False
-        task.cancel()
-        with contextlib.suppress(BaseException):
-            await task
-        holder = retained[0] if retained and isinstance(retained[0], bytes) else b""
-        return holder, False
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.data = bytearray()
+        self.overflowed = False
 
+    async def drain(self, stream: asyncio.StreamReader) -> None:
+        while chunk := await stream.read(65536):
+            room = self.limit - len(self.data)
+            if room > 0:
+                self.data += chunk[:room]
+            if len(chunk) > room:
+                self.overflowed = True
 
-def _kill_group(process: asyncio.subprocess.Process) -> None:
-    """Deliver SIGKILL to the child's whole process group, or the child.
-
-    Killing only the direct child leaves orphans holding the inherited
-    stdout/stderr write ends, so the drains block until the last holder
-    exits — forever for a ``setsid`` daemon. The child is started in its own
-    session (``start_new_session``), so the group kill covers descendants.
-    """
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-        return
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
-    with contextlib.suppress(ProcessLookupError):
-        process.kill()
-
-
-async def _drain_limited(
-    stream: asyncio.StreamReader,
-    *,
-    limit: int,
-    retained_holder: list[bytes] | None = None,
-) -> tuple[bytes, bool]:
-    """Drain a subprocess stream while retaining no more than ``limit`` bytes.
-
-    ``retained_holder`` (one-entry list, when provided) is kept current with
-    the bytes retained so far, so a caller that must abandon the drain under
-    the final grace bound can still salvage what already arrived.
-    """
-    retained = bytearray()
-    overflowed = False
-    while chunk := await stream.read(8192):
-        remaining = limit - len(retained)
-        if remaining > 0:
-            retained.extend(chunk[:remaining])
-        if len(chunk) > remaining:
-            overflowed = True
-        if retained_holder is not None:
-            retained_holder.clear()
-            retained_holder.append(bytes(retained))
-    return bytes(retained), overflowed
+    def text(self) -> str:
+        return self.data.decode("utf-8", errors="replace")
 
 
 async def _feed_and_wait(
@@ -159,6 +118,15 @@ async def _feed_and_wait(
     return await process.wait()
 
 
+def _kill_group(process: asyncio.subprocess.Process) -> None:
+    """SIGKILL the child's process group (the child is its leader)."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        if hasattr(os, "killpg"):
+            os.killpg(process.pid, signal.SIGKILL)
+        elif process.returncode is None:
+            process.kill()
+
+
 async def run_process(
     argv: Sequence[str],
     *,
@@ -168,7 +136,14 @@ async def run_process(
     stdin_text: str | None = None,
     env: Mapping[str, str] | None = None,
 ) -> ProcessResult:
-    """Execute an explicit argument vector without a shell or unbounded output."""
+    """Execute an explicit argument vector without a shell or unbounded output.
+
+    The child leads a new session: it has no controlling terminal, so nothing
+    can prompt on the host's TTY. When the child exits, times out, or the
+    caller is cancelled, its whole process group is killed, so leftover
+    descendants cannot hold the output pipes open. Every wait after that kill
+    is bounded, so a lost exit notification cannot hang the caller.
+    """
 
     if not argv or not argv[0]:
         raise CodingWorkflowError("A non-empty executable argument vector is required.")
@@ -183,60 +158,35 @@ async def run_process(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
-        # Own session + process group: the group kill takes the whole child
-        # tree (grandchildren holding the output pipes must not outlive the
-        # deadline or hold the drains open after the kill).
         start_new_session=True,
     )
     assert process.stdout is not None
     assert process.stderr is not None
-    stdout_holder: list[bytes] = []
-    stderr_holder: list[bytes] = []
-    stdout_task = asyncio.create_task(
-        _drain_limited(
-            process.stdout, limit=max_output_bytes, retained_holder=stdout_holder
-        )
-    )
-    stderr_task = asyncio.create_task(
-        _drain_limited(
-            process.stderr, limit=max_output_bytes, retained_holder=stderr_holder
-        )
-    )
+    stdout, stderr = _Capture(max_output_bytes), _Capture(max_output_bytes)
+    drains = asyncio.gather(stdout.drain(process.stdout), stderr.drain(process.stderr))
     stdin_bytes = stdin_text.encode("utf-8") if stdin_text is not None else None
     timed_out = False
     try:
-        await asyncio.wait_for(
-            _feed_and_wait(process, stdin_bytes), timeout=timeout_seconds
-        )
+        async with asyncio.timeout(timeout_seconds):
+            await _feed_and_wait(process, stdin_bytes)
     except TimeoutError:
         timed_out = True
-        _kill_group(process)
-        await process.wait()
-        # The group is gone, so the pipes close. The drains finish on EOF;
-        # bounded one more time so no pipe quirk can wedge the caller past
-        # its deadline.
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(
-                asyncio.gather(stdout_task, stderr_task, return_exceptions=True),
-                timeout=5,
-            )
     except BaseException:
-        # Cancelled (e.g. the caller's tool deadline): never orphan the child.
-        if process.returncode is None:
-            _kill_group(process)
-        stdout_task.cancel()
-        stderr_task.cancel()
-        with contextlib.suppress(BaseException):
-            await process.wait()
+        _kill_group(process)
+        drains.cancel()
         raise
-    stdout, stdout_overflowed = await _bounded_drain(stdout_task, stdout_holder)
-    stderr, stderr_overflowed = await _bounded_drain(stderr_task, stderr_holder)
+    _kill_group(process)
+    with contextlib.suppress(TimeoutError):
+        async with asyncio.timeout(_KILL_GRACE_SECONDS):
+            await asyncio.gather(drains, process.wait())
+    drains.cancel()
+    returncode = process.returncode
     return ProcessResult(
-        return_code=process.returncode or 0,
-        stdout=stdout.decode("utf-8", errors="replace"),
-        stderr=stderr.decode("utf-8", errors="replace"),
+        return_code=returncode if returncode is not None else -signal.SIGKILL,
+        stdout=stdout.text(),
+        stderr=stderr.text(),
         timed_out=timed_out,
-        output_truncated=stdout_overflowed or stderr_overflowed,
+        output_truncated=stdout.overflowed or stderr.overflowed,
     )
 
 
@@ -275,15 +225,24 @@ async def run_contained(
         raise CodingWorkflowError(
             "bwrap sandbox floor does not permit worktree writes."
         )
+    # bwrap's policy join treats an unspecified request axis as the pack's
+    # restrictive default, so a floor allowance on network/device/ipc only
+    # takes effect when forwarded explicitly (2026-10-15: workspace
+    # preparation starved without the network the session floor granted).
+    overrides: dict[str, Any] = {
+        "persistence": "direct-write",
+        "paths": {str(worktree): "rw"},
+    }
+    for axis in ("network", "device", "ipc"):
+        value = getattr(floor, axis, None)
+        if value is not None:
+            overrides[axis] = value
     tool_result = await dispatch(
         "bwrap_run",
         {
             "argv": list(argv),
             "cwd": str(worktree),
-            "overrides": {
-                "persistence": "direct-write",
-                "paths": {str(worktree): "rw"},
-            },
+            "overrides": overrides,
             "timeout_seconds": min(timeout_seconds, 600),
         },
     )
@@ -319,13 +278,24 @@ def workspace_python(worktree: Path) -> Path:
     )
 
 
-def expand_check_argv(check: CodingCheck, *, worktree: Path) -> tuple[str, ...]:
-    """Resolve the sole preparation-aware command placeholder."""
+def expand_argv_placeholders(argv: tuple[str, ...], *, worktree: Path) -> tuple[str, ...]:
+    """Resolve the sole preparation-aware command placeholder.
+
+    Shared by session-configured checks and preparation recipes: the session
+    authors the command vector, the pack resolves only ``{workspace_python}``
+    to the worktree-owned interpreter (and never invents toolchain flags).
+    """
 
     return tuple(
-        str(workspace_python(worktree)) if part == "{workspace_python}" else part
-        for part in check.argv
+        str(workspace_python(worktree)) if part == ARGV_WORKSPACE_PYTHON else part
+        for part in argv
     )
+
+
+def expand_check_argv(check: CodingCheck, *, worktree: Path) -> tuple[str, ...]:
+    """Resolve the check's command-vector placeholders."""
+
+    return expand_argv_placeholders(check.argv, worktree=worktree)
 
 
 def preparation_recipe_digest(recipe: CodingPreparationRecipe) -> str:
@@ -337,32 +307,57 @@ def preparation_recipe_digest(recipe: CodingPreparationRecipe) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def dependency_manifest_digest(worktree: Path, *, config: CodingPackConfig) -> str:
-    """Hash the bounded uv manifests that determine the local environment."""
+#: Dependency manifests are trusted repo content hashed for staleness
+#: evidence, not model-facing reads: the digest streams the hash instead of
+#: loading the file, so the ceiling bounds work per file without coupling to
+#: the read tool's max_file_bytes. Real uv.lock files reach several hundred
+#: kilobytes; 8 MiB covers every plausibly hand-installed lock.
+_MANIFEST_MAX_BYTES = 8 * 1024 * 1024
+_MANIFEST_CHUNK_BYTES = 512 * 1024
+
+
+def dependency_manifest_digest(
+    worktree: Path, *, recipe: CodingPreparationRecipe
+) -> str:
+    """Hash the recipe-declared dependency manifests for staleness evidence.
+
+    An empty ``manifest_paths`` means the recipe is self-describing: the
+    sentinel is stable and never stale (nothing feeded it). Declared paths
+    are worktree-relative and validated at configuration parse time; a
+    missing file still digests (its absence is evidence, and the error
+    surfaces where it matters — the prepare command itself).
+    """
 
     digest = hashlib.sha256()
-    found = False
-    for name in ("pyproject.toml", "uv.lock"):
-        path = worktree / name
-        if not path.is_file():
-            continue
-        payload = path.read_bytes()
-        if len(payload) > config.max_file_bytes:
-            raise CodingWorkflowError(f"Dependency manifest exceeds byte limit: {name}")
-        digest.update(name.encode("utf-8"))
+    for raw in recipe.manifest_paths:
+        name = raw.encode("utf-8")
+        digest.update(name)
         digest.update(b"\0")
-        digest.update(payload)
-        digest.update(b"\0")
-        found = True
-    if not found:
-        raise CodingWorkflowError("No dependency manifest exists in the worktree.")
+        path = worktree / raw
+        if path.is_file():
+            size = path.stat().st_size
+            if size > _MANIFEST_MAX_BYTES:
+                raise CodingWorkflowError(
+                    f"Dependency manifest exceeds byte limit: {raw}"
+                )
+            remaining = size
+            with path.open("rb") as stream:
+                while remaining > 0:
+                    chunk = stream.read(min(_MANIFEST_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+            digest.update(b"\0")
+        else:
+            digest.update(b"absent\0")
     return digest.hexdigest()
 
 
 def preparation_is_current(
     artifact: WorkProduct, *, worktree: Path, config: CodingPackConfig
 ) -> bool:
-    """Require current configuration, manifests, and owned interpreter evidence."""
+    """Require current recipe, manifests, and owned interpreter evidence."""
 
     if not config.preparation_recipes:
         return True
@@ -374,10 +369,15 @@ def preparation_is_current(
         return (
             preparation.recipe_digest == preparation_recipe_digest(recipe)
             and preparation.dependency_manifest_digest
-            == dependency_manifest_digest(worktree, config=config)
-            and Path(preparation.python_path).absolute()
-            == workspace_python(worktree).absolute()
-            and workspace_python(worktree).is_file()
+            == dependency_manifest_digest(worktree, recipe=recipe)
+            and (
+                not recipe.project_modules
+                or (
+                    Path(preparation.python_path).absolute()
+                    == workspace_python(worktree).absolute()
+                    and workspace_python(worktree).is_file()
+                )
+            )
         )
     except (OSError, ValueError, CodingWorkflowError):
         return False
@@ -399,7 +399,7 @@ async def run_git(
         timeout_seconds=config.git_timeout_seconds,
         max_output_bytes=config.max_command_output_bytes,
         stdin_text=stdin_text,
-        env=env,
+        env={**(os.environ if env is None else env), **_GIT_BACKGROUND_ENV},
     )
 
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from kernel.models import ToolExecutionContext, ToolResult
+from pydantic import BaseModel, Field
+
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.workflow import (
     CodingWorkflowError,
@@ -10,7 +12,6 @@ from lisa_packs.coding.workflow import (
     load_owned_artifact,
     run_git,
 )
-from pydantic import BaseModel, Field
 
 TOOL_ID = "coding_status"
 
@@ -36,7 +37,11 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         status = await run_git(worktree, ("status", "--short"), config=config)
         diff_stat = await run_git(worktree, ("diff", "--stat"), config=config)
         diff = await run_git(worktree, ("diff", "--no-ext-diff"), config=config)
-        if status.return_code != 0 or diff_stat.return_code != 0 or diff.return_code != 0:
+        if (
+            status.return_code != 0
+            or diff_stat.return_code != 0
+            or diff.return_code != 0
+        ):
             raise CodingWorkflowError(
                 status.stderr.strip()
                 or diff_stat.stderr.strip()
@@ -64,7 +69,12 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             "git_diff": diff.stdout,
             "git_diff_truncated": diff.output_truncated,
             "configured_check_ids": [check.id for check in config.checks],
-            "fix_check_ids": [check.id for check in config.checks if check.kind == "fix"],
+            "configured_preparation_recipe_ids": [
+                r.id for r in config.preparation_recipes
+            ],
+            "fix_check_ids": [
+                check.id for check in config.checks if check.kind == "fix"
+            ],
             "required_check_ids": list(artifact.required_check_ids),
             "checks": {
                 check_id: {

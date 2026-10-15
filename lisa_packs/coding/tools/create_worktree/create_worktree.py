@@ -6,11 +6,10 @@ import re
 from uuid import uuid4
 
 from kernel.models import ToolExecutionContext, ToolResult
-from pydantic import BaseModel, Field
-from sdk.workproducts import WorkProduct
-
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.workflow import CodingWorkflowError, run_git
+from pydantic import BaseModel, Field
+from sdk.workproducts import WorkProduct
 
 TOOL_ID = "coding_create_worktree"
 
@@ -35,6 +34,9 @@ class Parameters(BaseModel):
     #: Optional model-chosen slug for the branch/worktree (e.g. "auth-refactor");
     #: falls back to a random id so unnamed worktrees stay colliding-free.
     name: str = Field(default="", max_length=100)
+    #: Optional base tip: branch at this commit instead of the source HEAD
+    #: (e.g. the parent of an upstream commit meant for coding_import_commits).
+    import_commit: str = Field(default="", pattern=r"^$|^[0-9a-f]{40}$")
 
 
 def _branch_name(prefix: str, slug: str) -> str:
@@ -57,6 +59,25 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             raise CodingWorkflowError(
                 base.stderr.strip() or "Cannot resolve the source HEAD."
             )
+        base = base.stdout.strip()
+        if params.import_commit:
+            exists = await run_git(
+                source_root,
+                ("rev-parse", "--verify", f"{params.import_commit}^{{commit}}"),
+                config=config,
+            )
+            if exists.return_code != 0:
+                raise CodingWorkflowError(f"Unknown import commit '{params.import_commit}'.")
+            parent = await run_git(
+                source_root,
+                ("rev-parse", f"{params.import_commit}^"),
+                config=config,
+            )
+            if parent.return_code != 0 or not parent.stdout.strip():
+                raise CodingWorkflowError(
+                    "import_commit has no parent; the worktree base cannot match it."
+                )
+            base = parent.stdout.strip()
         named = bool(params.name.strip())
         slug = _normalize_name(params.name) if named else str(uuid4().hex[:12])
         artifact = WorkProduct(
@@ -68,10 +89,11 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             surface_id=ctx.surface_id,
             session_plan_digest=ctx.session_plan_digest,
             source_root=str(source_root),
-            base_sha=base.stdout.strip(),
-            head_sha=base.stdout.strip(),
+            base_sha=base,
+            head_sha=base,
             branch=_branch_name(config.branch_prefix, slug),
             required_check_ids=list(config.required_check_ids),
+            import_commit=params.import_commit or "",
             safe_summary=params.summary.strip(),
         )
         if (
@@ -81,17 +103,21 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             raise CodingWorkflowError(
                 "Configured feature branch conflicts with a protected branch."
             )
-        worktree_parent = source_root.parent / ".lisa-worktrees"
+        worktree_parent = config.resolve_worktree_parent(
+            data_dir=ctx.data_dir, source_root=source_root
+        ).resolve()
+        # The worktree must never land inside the source tree: the source
+        # checkout stays untouched and the artifact owns one tree only.
+        if worktree_parent.is_relative_to(source_root):
+            raise CodingWorkflowError(
+                "Resolved worktree directory must be outside the source workspace."
+            )
         # Unnamed worktrees keep the artifact-id directory (historical layout);
         # named worktrees use the slug so the tree is self-describing.
         worktree_path = (
             worktree_parent / (slug if named else artifact.artifact_id)
         ).resolve()
-        try:
-            worktree_path.relative_to(source_root)
-        except ValueError:
-            pass
-        else:
+        if worktree_path.is_relative_to(source_root):
             raise CodingWorkflowError(
                 "Derived worktree path must be outside the source workspace."
             )
@@ -138,5 +164,6 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             "branch": artifact.branch,
             "worktree_path": artifact.worktree_path,
             "base_sha": artifact.base_sha,
+            "import_commit": artifact.import_commit,
         },
     )

@@ -3,6 +3,5 @@ pack_id: lisa-pack-coding
 description: "Discover and read VS Code Copilot customization files (.github/{instructions,agents,prompts,skills} and .claude equivalents) from the local coding workspace, returning structured front-matter and body JSON."
 exportable: true
 effect: read
-exportable: true
 default_available: false
 max_calls_per_turn: 10

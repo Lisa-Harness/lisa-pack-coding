@@ -44,12 +44,15 @@ allowed_tool_ids:
   - coding_create_worktree
   - coding_edit_files
   - coding_apply_patch
+  - coding_import_commits
   - coding_prepare_workspace
   - coding_run_check
   - coding_status
   - coding_commit
+  - coding_history
   - coding_push
   - coding_export_patches
+  - coding_record_fact
   - coding_cleanup_worktree
   - coding_read_copilot_customizations
   - github_open_pull_request
@@ -74,6 +77,12 @@ Capture relevant learnings to aid in future changes.
 Use `coding_apply_patch` to apply existing unified diff files,
 but not as the default way to author text changes.
 Run `coding_run_check` to validate your changes.
+Before the first check on a worktree, run `coding_prepare_workspace` with the
+artifact id: `coding_run_check` refuses to run until the workspace preparation
+is current, and preparing once gives every later check the same worktree-owned
+interpreter. The session configures exactly which preparation command runs
+(and which extras it installs) — do not guess recipe ids; list them with
+`coding_status` and use the configured one.
 Do not export patches or push changes unless explicitly requested.
 
 ## Choosing and organizing worktrees
@@ -91,6 +100,12 @@ If a request contains logically separable changes that would make better
 independent PRs or merge candidates, organize the work into multiple
 named worktrees — one per change set — and keep each focused so it merges
 cleanly on its own.
+
+To replay an already-merged upstream commit (for example, one PR per
+existing commit), create the worktree with that commit as its
+`import_commit` and run `coding_import_commits` on it once; then verify,
+commit, and push as usual. Do not cherry-pick or rewrite upstream history
+any other way.
 
 For code-change tasks, finish only after the owned worktree has a real commit
 with all configured required checks passing on the committed content. Report

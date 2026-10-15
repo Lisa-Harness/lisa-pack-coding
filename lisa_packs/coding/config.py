@@ -8,6 +8,12 @@ from typing import Literal
 from kernel.models import ToolExecutionContext
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+#: The one placeholder session-authored command vectors (checks and
+#: preparation recipes) may use; the pack resolves it to the worktree-owned
+#: interpreter. Session text never expands it, and the pack invents nothing
+#: else. Single source of truth shared with the workflow helpers.
+ARGV_WORKSPACE_PYTHON = "{workspace_python}"
+
 __all__ = [
     "CodingCheck",
     "CodingPackConfig",
@@ -30,13 +36,28 @@ class CodingCheck(BaseModel):
 
 
 class CodingPreparationRecipe(BaseModel):
-    """One finite, session-authorized workspace preparation recipe."""
+    """One finite, session-authorized workspace preparation recipe.
+
+    The prepare command is a session-authored argument vector, exactly like
+    the pack's checks: the pack owns the mechanics (sandbox containment,
+    interpreter probe, baseline evidence), the session owns the toolchain.
+    ``{workspace_python}`` is the only placeholder, resolved like a check's.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: str = Field(min_length=1, max_length=80)
-    manager: Literal["uv"] = "uv"
-    project_modules: tuple[str, ...] = Field(min_length=1, max_length=20)
+    prepare_argv: tuple[str, ...] = Field(min_length=1, max_length=100)
+    #: Worktree-relative dependency-manifest paths that feed staleness
+    #: evidence. An empty tuple means the recipe is self-describing and
+    #: staleness rides the recipe hash alone. Declared so the gate matches
+    #: the recipe's toolchain: a uv recipe sees uv.lock, an npm recipe sees
+    #: package-lock.json.
+    manifest_paths: tuple[str, ...] = Field(default=(), max_length=8)
+    #: Modules (import names) that must resolve from the worktree-owned
+    #: interpreter after preparation. Empty skips the interpreter probe for
+    #: recipes that do not produce one.
+    project_modules: tuple[str, ...] = Field(default=(), max_length=20)
     baseline_check_ids: tuple[str, ...] = ()
     timeout_seconds: int = Field(default=600, ge=1, le=1800)
 
@@ -77,6 +98,9 @@ class CodingPackConfig(BaseModel):
     push_remote: str = Field(default="origin", min_length=1, max_length=100)
     #: Absolute parent for exported patch series; empty means ``<source-parent>/.lisa-patches``.
     patch_export_dir: str = ""
+    #: Absolute parent under which owned worktrees are created; empty means
+    #: ``<data-dir>/git-worktrees/<workspace-name>`` from the host-injected data dir.
+    worktree_dir: str = ""
 
     @model_validator(mode="after")
     def _validate_checks(self) -> CodingPackConfig:
@@ -91,6 +115,7 @@ class CodingPackConfig(BaseModel):
         recipe_ids = [recipe.id for recipe in self.preparation_recipes]
         if len(recipe_ids) != len(set(recipe_ids)):
             raise ValueError("preparation_recipes must use unique IDs")
+        probes_interpreter = False
         for recipe in self.preparation_recipes:
             unknown_baseline = sorted(set(recipe.baseline_check_ids) - set(check_ids))
             if unknown_baseline:
@@ -98,18 +123,50 @@ class CodingPackConfig(BaseModel):
                     f"recipe '{recipe.id}' references unknown baseline checks: "
                     + ", ".join(unknown_baseline)
                 )
-        if self.preparation_recipes:
+            probes_interpreter = probes_interpreter or bool(recipe.project_modules)
+            for raw in recipe.manifest_paths:
+                candidate = Path(raw)
+                if candidate.is_absolute() or ".." in candidate.parts:
+                    raise ValueError(
+                        f"recipe '{recipe.id}' manifest path must be relative "
+                        f"without traversal: {raw!r}"
+                    )
+        if probes_interpreter:
             checks_without_owned_python = [
-                check.id for check in self.checks if "{workspace_python}" not in check.argv
+                check.id for check in self.checks if ARGV_WORKSPACE_PYTHON not in check.argv
             ]
             if checks_without_owned_python:
                 raise ValueError(
-                    "checks must include {workspace_python} when preparation_recipes are configured: "
+                    "checks must include {workspace_python} when a preparation "
+                    "recipe declares project_modules: "
                     + ", ".join(checks_without_owned_python)
                 )
         if any(branch in self.protected_branches for branch in ("", self.branch_prefix)):
             raise ValueError("branch_prefix must not be an empty or protected branch")
+        if self.worktree_dir and not Path(self.worktree_dir).is_absolute():
+            raise ValueError("worktree_dir must be an absolute path")
         return self
+
+    def resolve_worktree_parent(self, *, data_dir: str, source_root: Path) -> Path:
+        """Resolve the parent directory under which owned worktrees are created.
+
+        An explicit ``worktree_dir`` wins; otherwise the default lives inside
+        the host data dir at ``git-worktrees/<workspace-name>``, named after
+        the source checkout so several repositories share one data root. The
+        host always injects a resolved ``data_dir``; without one (a pack-only
+        context) creation fails fast rather than scattering worktrees in an
+        unpredictable location.
+        """
+
+        if self.worktree_dir:
+            return Path(self.worktree_dir).expanduser()
+        root = (data_dir or "").strip()
+        if not root:
+            raise ValueError(
+                "worktree_dir is not configured and the host injected no data_dir; "
+                "set worktree_dir to an absolute path."
+            )
+        return Path(root) / "git-worktrees" / source_root.name
 
     def preparation_recipe(self, recipe_id: str | None) -> CodingPreparationRecipe:
         """Return an explicitly or uniquely selected finite preparation recipe."""

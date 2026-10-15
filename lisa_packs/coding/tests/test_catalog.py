@@ -40,11 +40,14 @@ _LOCAL_WRITE_TOOLS = {
     "coding_create_worktree",
     "coding_apply_patch",
     "coding_edit_files",
+    "coding_import_commits",
     "coding_prepare_workspace",
     "coding_run_check",
+    "coding_record_fact",
     "coding_commit",
     "coding_export_patches",
     "coding_cleanup_worktree",
+    "coding_history",
 }
 
 # Publication reaches outside the workspace, so it is ``external_write``.

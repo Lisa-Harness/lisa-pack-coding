@@ -103,7 +103,7 @@ def _real_sandbox(
 
     paths = {
         str(factory.root): "ro",
-        str(factory.root.parent / ".lisa-worktrees"): "rw",
+        str(factory.data_dir or factory.root / ".packstest-data" / "git-worktrees"): "rw",
         **{str(path): "ro" for path in read_only_paths},
     }
     floor = {
@@ -375,6 +375,18 @@ async def _python_preparation_fixture(
             "    def test_greeting(self):\n"
             '        self.assertEqual(greeting(), "hello")\n'
         ),
+        # A PEP 420 namespace package: no __init__.py, so the interpreter
+        # exposes it through __path__ alone and __file__ stays unset. The
+        # probe must certify namespace members or workspaces whose own
+        # source layout is a namespace (the Lisa workspace's sdk) can
+        # never prepare.
+        "nsspace/mod.py": "VALUE = 1\n",
+        "test_nsspace_imports.py": (
+            "import unittest\nimport nsspace.mod\n\n"
+            "class NamespaceImportTest(unittest.TestCase):\n"
+            "    def test_imports(self):\n"
+            "        self.assertEqual(nsspace.mod.VALUE, 1)\n"
+        ),
     }
     for path, text in files.items():
         await repo.commit_file(path, text, f"seed {path}")
@@ -394,7 +406,16 @@ async def _python_preparation_fixture(
             "preparation_recipes": [
                 {
                     "id": "python-uv",
-                    "project_modules": ["app"],
+                    "prepare_argv": [
+                        "env",
+                        "TMPDIR=.lisa-tmp",
+                        "uv",
+                        "sync",
+                        "--locked",
+                        "--no-cache",
+                    ],
+                    "manifest_paths": ["uv.lock"],
+                    "project_modules": ["app", "nsspace"],
                     "baseline_check_ids": ["unit"],
                     "timeout_seconds": 60,
                 }
@@ -415,7 +436,11 @@ async def _assert_python_preparation(
     assert preparation.status == "ready"
     assert preparation.recipe_digest and preparation.dependency_manifest_digest
     assert preparation.python_path == str(worktree / ".venv" / "bin" / "python")
-    assert json.loads(preparation.probe_stdout)["origins"] == {"app": str(worktree / "app.py")}
+    probe_origins = json.loads(preparation.probe_stdout)["origins"]
+    assert probe_origins["app"] == str(worktree / "app.py")
+    # A PEP 420 namespace project module has no __file__; the probe certifies
+    # its merged __path__ entries (here only the worktree's own source dir).
+    assert probe_origins["nsspace"] == [str(worktree / "nsspace")]
     assert preparation.baseline_checks["unit"].status == "passed"
     assert preparation.baseline_checks["unit"].checked_tree_sha == preparation.baseline_tree_sha
     assert artifact.checks == {}
@@ -826,7 +851,11 @@ async def test_rejected_patch_can_be_corrected_without_mutating_first(
     catalog: dict[str, dict[str, object]],
 ) -> None:
     repo = await git_repo(tmp_path)
-    factory = ToolContextFactory(root=repo.root, pack_config=_config(repo.root))
+    factory = ToolContextFactory(
+        root=repo.root,
+        pack_config=_config(repo.root),
+        data_dir=tmp_path / "data",
+    )
     created = await run_tool(catalog, "coding_create_worktree", factory, {"summary": "format test"})
     artifact_id = str(created.result.output_json["artifact_id"])
     worktree = Path(str(created.result.output_json["worktree_path"]))
@@ -861,7 +890,11 @@ async def test_full_worktree_trajectory(
     """The create→patch→check→commit→push chain reaches ``pushed`` cleanly."""
 
     repo = await git_repo(tmp_path)
-    factory = ToolContextFactory(root=repo.root, pack_config=_config(repo.root))
+    factory = ToolContextFactory(
+        root=repo.root,
+        pack_config=_config(repo.root),
+        data_dir=tmp_path / "data",
+    )
     factory.identity["task_id"] = "coding-task"
     _verified_sandbox(factory)
     trajectory = Trajectory(name="worktree-full-chain")
@@ -954,7 +987,7 @@ async def test_required_check_rejects_changed_candidate_tree(
 ) -> None:
     repo = await git_repo(tmp_path)
     config = {**_config(repo.root), "required_check_ids": ["smoke"]}
-    factory = ToolContextFactory(root=repo.root, pack_config=config)
+    factory = ToolContextFactory(root=repo.root, pack_config=config, data_dir=tmp_path / "data")
     _verified_sandbox(factory)
     created = await run_tool(catalog, "coding_create_worktree", factory, {"summary": "test"})
     artifact_id = str(created.result.output_json["artifact_id"])
@@ -992,7 +1025,11 @@ async def test_cleanup_worktree_transitions_to_cleaned(
     """Cleanup removes the worktree and the artifact records ``cleaned``."""
 
     repo = await git_repo(tmp_path)
-    factory = ToolContextFactory(root=repo.root, pack_config=_config(repo.root))
+    factory = ToolContextFactory(
+        root=repo.root,
+        pack_config=_config(repo.root),
+        data_dir=tmp_path / "data",
+    )
     trajectory = Trajectory(name="cleanup")
 
     run = await _step(catalog, factory, trajectory, "coding_create_worktree", {"summary": "eval"})
@@ -1018,10 +1055,14 @@ async def test_worktree_paths_stay_outside_source(
     tmp_path: Path,
     catalog: dict[str, dict[str, object]],
 ) -> None:
-    """Owned worktrees live under <repo-parent>/.lisa-worktrees, never inside."""
+    """Owned worktrees live under <data-dir>/git-worktrees, never inside the source."""
 
     repo = await git_repo(tmp_path)
-    factory = ToolContextFactory(root=repo.root, pack_config=_config(repo.root))
+    factory = ToolContextFactory(
+        root=repo.root,
+        pack_config=_config(repo.root),
+        data_dir=tmp_path / "data",
+    )
     run = await run_tool(catalog, "coding_create_worktree", factory, {"summary": "eval"})
     worktree = Path(str(run.result.output_json["worktree_path"]))
     try:
@@ -1044,7 +1085,11 @@ async def test_patch_policy_rejects_paths_outside_workspace(
     """A patch referencing a traversal path is refused before git apply."""
 
     repo = await git_repo(tmp_path)
-    factory = ToolContextFactory(root=repo.root, pack_config=_config(repo.root))
+    factory = ToolContextFactory(
+        root=repo.root,
+        pack_config=_config(repo.root),
+        data_dir=tmp_path / "data",
+    )
     run = await run_tool(catalog, "coding_create_worktree", factory, {"summary": "eval"})
     artifact_id = str(run.result.output_json["artifact_id"])
 
@@ -1069,7 +1114,11 @@ async def test_required_check_refuses_missing_sandbox(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = await git_repo(tmp_path)
-    factory = ToolContextFactory(root=repo.root, pack_config=_config(repo.root))
+    factory = ToolContextFactory(
+        root=repo.root,
+        pack_config=_config(repo.root),
+        data_dir=tmp_path / "data",
+    )
     created = await run_tool(catalog, "coding_create_worktree", factory, {"summary": "test"})
     artifact_id = str(created.result.output_json["artifact_id"])
     patched = await run_tool(
@@ -1099,7 +1148,11 @@ async def test_required_check_rejects_restricted_worktree_floor(
     catalog: dict[str, dict[str, object]],
 ) -> None:
     repo = await git_repo(tmp_path)
-    factory = ToolContextFactory(root=repo.root, pack_config=_config(repo.root))
+    factory = ToolContextFactory(
+        root=repo.root,
+        pack_config=_config(repo.root),
+        data_dir=tmp_path / "data",
+    )
     created = await run_tool(catalog, "coding_create_worktree", factory, {"summary": "test"})
     artifact_id = str(created.result.output_json["artifact_id"])
     worktree = str(created.result.output_json["worktree_path"])
@@ -1136,7 +1189,11 @@ async def test_check_rejects_worktree_mutation_during_sandbox_run(
     catalog: dict[str, dict[str, object]],
 ) -> None:
     repo = await git_repo(tmp_path)
-    factory = ToolContextFactory(root=repo.root, pack_config=_config(repo.root))
+    factory = ToolContextFactory(
+        root=repo.root,
+        pack_config=_config(repo.root),
+        data_dir=tmp_path / "data",
+    )
     created = await run_tool(catalog, "coding_create_worktree", factory, {"summary": "test"})
     artifact_id = str(created.result.output_json["artifact_id"])
     patched = await run_tool(
@@ -1158,7 +1215,8 @@ async def test_check_rejects_worktree_mutation_during_sandbox_run(
         catalog, "coding_run_check", factory, {"artifact_id": artifact_id, "check_id": "smoke"}
     )
     assert "modified app.txt; the edits were reverted" in checked.result.error
-    assert (repo.root.parent / ".lisa-worktrees" / artifact_id / "app.txt").read_text(
+    data_root = factory.data_dir or factory.root / ".packstest-data"
+    assert (data_root / "git-worktrees" / "source" / artifact_id / "app.txt").read_text(
         encoding="utf-8"
     ) != "changed during check\n"
     artifact = await factory.artifact_store.get(artifact_id)
@@ -1173,7 +1231,7 @@ async def test_timed_out_check_cannot_certify_commit(
 ) -> None:
     repo = await git_repo(tmp_path)
     config = {**_config(repo.root), "required_check_ids": ["smoke"]}
-    factory = ToolContextFactory(root=repo.root, pack_config=config)
+    factory = ToolContextFactory(root=repo.root, pack_config=config, data_dir=tmp_path / "data")
     created = await run_tool(catalog, "coding_create_worktree", factory, {"summary": "test"})
     artifact_id = str(created.result.output_json["artifact_id"])
     patched = await run_tool(
@@ -1208,7 +1266,11 @@ async def test_no_required_checks_allows_commit_without_running_optional_check(
     catalog: dict[str, dict[str, object]],
 ) -> None:
     repo = await git_repo(tmp_path)
-    factory = ToolContextFactory(root=repo.root, pack_config=_config(repo.root))
+    factory = ToolContextFactory(
+        root=repo.root,
+        pack_config=_config(repo.root),
+        data_dir=tmp_path / "data",
+    )
     created = await run_tool(catalog, "coding_create_worktree", factory, {"summary": "test"})
     artifact_id = str(created.result.output_json["artifact_id"])
     patched = await run_tool(
@@ -1243,7 +1305,11 @@ async def test_required_check_rejects_unverified_sandbox_result(
     payload: dict[str, object],
 ) -> None:
     repo = await git_repo(tmp_path)
-    factory = ToolContextFactory(root=repo.root, pack_config=_config(repo.root))
+    factory = ToolContextFactory(
+        root=repo.root,
+        pack_config=_config(repo.root),
+        data_dir=tmp_path / "data",
+    )
     created = await run_tool(catalog, "coding_create_worktree", factory, {"summary": "test"})
     artifact_id = str(created.result.output_json["artifact_id"])
     patched = await run_tool(

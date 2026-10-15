@@ -84,6 +84,9 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         artifact.commit_sha = head.stdout.strip()
         artifact.head_sha = artifact.commit_sha
         artifact.status = "committed"
+        # A commit carries the imported content out of the pending-import state.
+        artifact.imported_commits = {}
+        artifact.import_commit = ""
         await ctx.code_change_artifact_store.save(artifact)
     except (CodingWorkflowError, OSError, ValueError) as exc:
         return ToolResult(tool_id=TOOL_ID, error=str(exc))
