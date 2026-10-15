@@ -5,3 +5,6 @@ exportable: true
 effect: write
 approval_required: true
 approval_preview: "prepare the configured environment in the owned worktree"
+# The recipe's own timeout_seconds (up to 1800) bounds its prepare command
+# and baseline checks; the wrapper must outlive them (sdk/AUTHORING.md).
+timeout_seconds: 1800

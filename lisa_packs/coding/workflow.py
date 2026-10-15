@@ -12,7 +12,7 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from kernel.models import ToolExecutionContext
 from sdk.workproducts import WorkProduct, WorkProductStore
@@ -221,15 +221,24 @@ async def run_contained(
     nearest = max(matching_paths, key=lambda entry: len(entry[0].parts), default=None)
     if nearest is None or nearest[1] != "rw":
         raise CodingWorkflowError("bwrap sandbox floor does not permit worktree writes.")
+    # bwrap's policy join treats an unspecified request axis as the pack's
+    # restrictive default, so a floor allowance on network/device/ipc only
+    # takes effect when forwarded explicitly (2026-10-15: workspace
+    # preparation starved without the network the session floor granted).
+    overrides: dict[str, Any] = {
+        "persistence": "direct-write",
+        "paths": {str(worktree): "rw"},
+    }
+    for axis in ("network", "device", "ipc"):
+        value = getattr(floor, axis, None)
+        if value is not None:
+            overrides[axis] = value
     tool_result = await dispatch(
         "bwrap_run",
         {
             "argv": list(argv),
             "cwd": str(worktree),
-            "overrides": {
-                "persistence": "direct-write",
-                "paths": {str(worktree): "rw"},
-            },
+            "overrides": overrides,
             "timeout_seconds": min(timeout_seconds, 600),
         },
     )
