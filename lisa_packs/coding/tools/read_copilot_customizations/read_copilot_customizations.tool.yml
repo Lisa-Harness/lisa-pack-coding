@@ -4,4 +4,4 @@ description: "Discover and read VS Code Copilot customization files (.github/{in
 exportable: true
 effect: read
 default_available: false
-max_calls_per_turn: 10
+max_calls_per_turn: 1
