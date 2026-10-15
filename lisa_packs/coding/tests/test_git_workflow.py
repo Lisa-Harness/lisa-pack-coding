@@ -13,6 +13,7 @@ import shutil
 import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from kernel.capability_binding import ExecutionFloorView
@@ -63,6 +64,7 @@ from lisa_packs.coding.config import (
     get_coding_config,
 )
 from lisa_packs.coding.workflow import (
+    ProcessResult,
     dependency_manifest_digest,
     expand_argv_placeholders,
     preparation_recipe_digest,
@@ -2233,6 +2235,84 @@ async def test_create_worktree_defaults_under_data_dir_and_rejects_missing_data_
     missing = await create_worktree(ctx)
 
     assert "data_dir" in missing.error
+
+
+@pytest.mark.asyncio
+async def test_cleanup_after_manual_worktree_removal_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    """Cleaning up an already-vanished worktree succeeds and records ``cleaned``."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "already-gone"}))
+    artifact_id = created.output_json["artifact_id"]
+    worktree_path = Path(created.output_json["worktree_path"])
+
+    # The user (or a check) deleted the worktree directory, leaving a stale
+    # Git registration behind; the model was told it was gone and retries.
+    shutil.rmtree(worktree_path)
+
+    first = await cleanup_worktree(_context(root, store, {"artifact_id": artifact_id}))
+    assert first.error == ""
+    assert first.output_json["already_removed"] is True
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    assert artifact.status == "cleaned"
+
+    # A repeated cleanup call after the registration is gone is also success.
+    assert await _git_out(root, "worktree", "prune") == ""
+    second = await cleanup_worktree(_context(root, store, {"artifact_id": artifact_id}))
+    assert second.error == ""
+    assert second.output_json["already_removed"] is True
+    assert not worktree_path.exists()
+
+    # Once cleaned, the artifact remains final (and delete is unblocked).
+    assert (await store.get(artifact_id)).status == "cleaned"
+
+    # An unrelated directory squatting the worktree path is still an error:
+    # it is not "already removed", it is an unexpected filesystem state.
+    squat = await create_worktree(_context(root, store, {"name": "squat-me"}))
+    squat_id = squat.output_json["artifact_id"]
+    squat_path = Path(squat.output_json["worktree_path"])
+    shutil.rmtree(squat_path)
+    squat_path.mkdir()
+    squatted = await cleanup_worktree(_context(root, store, {"artifact_id": squat_id}))
+    assert "not available as a Git worktree" in squatted.error
+    shutil.rmtree(squat_path)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_reports_removed_when_git_prunes_between_check_and_git(
+    tmp_path: Path,
+) -> None:
+    """A "not a working tree" remove outcome is already-removed, not an error."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "pruned-race"}))
+    artifact_id = created.output_json["artifact_id"]
+
+    from lisa_packs.coding.tools.cleanup_worktree import (
+        cleanup_worktree as cleanup_worktree_module,
+    )
+
+    async def raced_run_git(
+        root_dir: Path, args: tuple[str, ...], **_: object
+    ) -> ProcessResult:
+        assert args[:2] == ("worktree", "remove")
+        return ProcessResult(
+            return_code=128,
+            stdout="",
+            stderr=f"fatal: '{args[2]}' is not a working tree",
+        )
+
+    with patch.object(cleanup_worktree_module, "run_git", raced_run_git):
+        raced = await cleanup_worktree(_context(root, store, {"artifact_id": artifact_id}))
+
+    assert raced.error == ""
+    assert raced.output_json["already_removed"] is True
+    assert (await store.get(artifact_id)).status == "cleaned"
 
 
 @pytest.mark.asyncio

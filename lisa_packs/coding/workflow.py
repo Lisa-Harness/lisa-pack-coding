@@ -513,8 +513,19 @@ def artifact_owner_matches(artifact: WorkProduct, ctx: ToolExecutionContext) -> 
     return artifact.belongs_to(ctx)
 
 
-def artifact_worktree(artifact: WorkProduct, *, config: CodingPackConfig) -> Path:
-    """Return a validated owned worktree that remains outside the source root."""
+def artifact_worktree(
+    artifact: WorkProduct,
+    *,
+    config: CodingPackConfig,
+    allow_missing: bool = False,
+) -> Path:
+    """Return a validated owned worktree that remains outside the source root.
+
+    ``allow_missing`` skips the on-disk existence checks for cleanup, which
+    must treat an already-removed worktree as done; every caller that reads or
+    writes worktree contents keeps the default and still gets an error when
+    the worktree is gone.
+    """
 
     source_root = config.resolve_workspace_root()
     if Path(artifact.source_root).resolve() != source_root:
@@ -532,7 +543,14 @@ def artifact_worktree(artifact: WorkProduct, *, config: CodingPackConfig) -> Pat
         raise CodingWorkflowError(
             "Artifact worktree must live outside the source workspace."
         )
-    if not worktree.is_dir() or not (worktree / ".git").exists():
+    if allow_missing:
+        # Present but not an actual Git worktree: a directory squats the
+        # artifact's path, so treat it as invalid even when missing is allowed.
+        if worktree.is_dir() and not (worktree / ".git").exists():
+            raise CodingWorkflowError(
+                "Artifact worktree is not available as a Git worktree."
+            )
+    elif not worktree.is_dir() or not (worktree / ".git").exists():
         raise CodingWorkflowError(
             "Artifact worktree is not available as a Git worktree."
         )
@@ -546,11 +564,14 @@ async def load_owned_artifact(
     config: CodingPackConfig,
     require_worktree: bool = True,
     claim: bool = False,
+    allow_missing_worktree: bool = False,
 ) -> WorkProduct:
     """Load an artifact only when the host and workspace ownership match.
 
     ``claim`` hands the artifact to the calling task (persisted by the caller's
     save); tools that advance the artifact claim it, reads never do.
+    ``allow_missing_worktree`` skips worktree existence checks for cleanup,
+    which treats an already-removed worktree as nothing left to do.
     """
 
     store = ctx.code_change_artifact_store
@@ -565,7 +586,9 @@ async def load_owned_artifact(
             "Artifact does not belong to this workspace, user, or session."
         )
     if require_worktree:
-        artifact_worktree(artifact, config=config)
+        artifact_worktree(
+            artifact, config=config, allow_missing=allow_missing_worktree
+        )
     if claim:
         artifact.claim_for_task(ctx)
     return artifact
