@@ -1,6 +1,6 @@
 tool_id: coding_create_worktree
 pack_id: lisa-pack-coding
-description: "Create an owned feature worktree outside the configured source checkout."
+description: "Create an owned feature worktree outside the configured source checkout. The optional import_commit accepts any Git revision (full or short SHA, branch, tag, or HEAD); the worktree branches at that revision's commit's parent and coding_import_commits then replays that one commit's diff."
 exportable: true
 effect: write
 approval_required: true

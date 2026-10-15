@@ -20,15 +20,25 @@ class Parameters(BaseModel):
     """Structured upstream import request."""
 
     artifact_id: str = Field(min_length=1, max_length=100)
-    import_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    import_commit: str = Field(
+        max_length=200,
+        description=(
+            "Git revision to replay: the full or short SHA, branch, tag, or"
+            " HEAD reference the artifact was anchored to when created."
+        ),
+    )
 
 
 async def execute(ctx: ToolExecutionContext) -> ToolResult:
     """Apply an upstream commit's diff to the worktree, bump the revision, and record it.
 
-    The worktree is created at ``import_commit``'s parent (see
-    ``coding_create_worktree``), so its tree matches that commit; ``git
-    diff import_commit^..import_commit`` is therefore exactly the change the
+    ``import_commit`` accepts any Git revision expression (full or short SHA,
+    branch, tag, HEAD); it resolves to that revision's full commit SHA, and
+    every guard compares canonical SHAs, so an artifact anchored at ``HEAD``
+    imports cleanly from the bare SHA or an equivalent reference. The worktree
+    is created at ``import_commit``'s parent (see ``coding_create_worktree``),
+    so its tree matches that commit; ``git diff
+    import_commit^..import_commit`` is therefore exactly the change the
     commit introduces, and applying it reproduces the commit's content.
     """
 
@@ -42,28 +52,40 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             config=config,
             claim=True,
         )
-        if params.import_commit in artifact.imported_commits:
-            raise CodingWorkflowError(
-                "Upstream commit was already imported; commit or export patches first."
-            )
-        if artifact.import_commit and artifact.import_commit != params.import_commit:
-            raise CodingWorkflowError(
-                "Artifact must import the commit recorded at worktree creation."
-            )
+        # Resolve to the canonical full SHA first: the guards then compare
+        # canonical forms, so an artifact anchored via one revision text
+        # (HEAD) imports cleanly with any equivalent reference to the same
+        # commit, and the artifact records the resolved SHA whatever text the
+        # caller passed.
         worktree = artifact_worktree(artifact, config=config)
         created = await run_git(
             source_root,
-            ("rev-parse", "--verify", f"{params.import_commit}^{{commit}}"),
+            ("rev-parse", "--verify", "--quiet", f"{params.import_commit}^{{commit}}"),
             config=config,
         )
-        if created.return_code != 0:
+        import_commit = created.stdout.strip() if created.return_code == 0 else ""
+        # An anchored artifact keeps its recorded-anchor error for an unknown
+        # revision, matching the guard order before resolution existed.
+        if not import_commit:
+            if artifact.import_commit:
+                raise CodingWorkflowError(
+                    "Artifact must import the commit recorded at worktree creation."
+                )
             raise CodingWorkflowError(f"Unknown import commit '{params.import_commit}'.")
+        if import_commit in artifact.imported_commits:
+            raise CodingWorkflowError(
+                "Upstream commit was already imported; commit or export patches first."
+            )
+        if artifact.import_commit and artifact.import_commit != import_commit:
+            raise CodingWorkflowError(
+                "Artifact must import the commit recorded at worktree creation."
+            )
         parent = await run_git(
             source_root,
-            ("rev-parse", f"{params.import_commit}^"),
+            ("rev-parse", "--verify", "--quiet", f"{params.import_commit}^"),
             config=config,
         )
-        if parent.return_code != 0:
+        if parent.return_code != 0 or not parent.stdout.strip():
             raise CodingWorkflowError(
                 "Import commit has no parent; the worktree base cannot match its parent."
             )
@@ -121,9 +143,9 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             raise CodingWorkflowError(checked.stderr.strip() or "git apply failed")
         artifact.imported_commits = {
             **artifact.imported_commits,
-            params.import_commit: base,
+            import_commit: base,
         }
-        artifact.import_commit = params.import_commit
+        artifact.import_commit = import_commit
         artifact.revision += 1
         artifact.changed_paths = list(dict.fromkeys([*artifact.changed_paths, *affected_paths]))
         artifact.checks = {}
@@ -135,12 +157,12 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     return ToolResult(
         tool_id=TOOL_ID,
         output_text=(
-            f"Imported upstream commit {params.import_commit} onto {artifact.branch} "
+            f"Imported upstream commit {import_commit} onto {artifact.branch} "
             f"at revision {artifact.revision}."
         ),
         output_json={
             "artifact_id": artifact.artifact_id,
-            "import_commit": params.import_commit,
+            "import_commit": import_commit,
             "base_sha": base,
             "changed_paths": affected_paths,
             "branch": artifact.branch,

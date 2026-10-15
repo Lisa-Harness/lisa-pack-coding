@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import difflib
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from itertools import islice
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import CodingPackConfig, get_coding_config
@@ -22,9 +24,197 @@ from lisa_packs.coding.workflow import (
     load_owned_artifact,
     run_git,
 )
-from pydantic import BaseModel, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 TOOL_ID = "coding_edit_files"
+
+
+class _JsonTailState:
+    """Final scan state of a structural walk over a truncated JSON payload."""
+
+    __slots__ = ("dangling_escape", "stack", "string_open")
+
+    def __init__(
+        self, stack: list[str], string_open: bool, dangling_escape: bool
+    ) -> None:
+        self.stack = stack
+        self.string_open = string_open
+        self.dangling_escape = dangling_escape
+
+
+def _scan_json_tail(text: str) -> _JsonTailState | None:
+    """Walk ``text`` honoring JSON string/escape state and open brackets.
+
+    Returns ``None`` when the payload is not a plausibly-truncated JSON
+    document: a closer that pops an empty stack or mismatches its opening
+    bracket means the model sent something other than an unterminated
+    structure, and appending characters cannot fix it.
+    """
+
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            stack.append(char)
+        elif char in "]}":
+            if not stack:
+                return None
+            expected = "]" if stack[-1] == "[" else "}"
+            if char != expected:
+                return None
+            stack.pop()
+    return _JsonTailState(stack, in_string, escaped)
+
+
+def _complete_json_payload(text: str) -> str | None:
+    """Close a truncated JSON payload's tail, or return ``None`` to refuse.
+
+    Appends the missing closing quote (when the payload ends inside a string)
+    and the missing bracket closers. A dangling trailing escape cannot be
+    completed faithfully — ``\\"`` is itself ambiguous — so that shape is
+    refused. The caller must still ``json.loads`` the result: appending
+    closers can yield structurally closed but syntactically invalid JSON
+    (a trailing comma before the end), which this function leaves for the
+    parse gate to reject.
+    """
+
+    state = _scan_json_tail(text)
+    if state is None:
+        return None
+    if not state.stack and not state.string_open:
+        return None
+    if state.dangling_escape:
+        return None
+    completed = text
+    if state.string_open:
+        completed += '"'
+    completed += "".join(
+        "]" if opener == "[" else "}" for opener in reversed(state.stack)
+    )
+    return completed
+
+
+def _decode_string_edits(value: str) -> list[FileEdit] | None:
+    """Decode a model that serialized ``edits`` into a JSON string.
+
+    glm-5.3:cloud twice rendered ``edits`` as a JSON-escaped string inside the
+    arguments object (2026-10-14 self-review run: 4 of 8 edit calls), once
+    with the under-layer truncated by missing tail closers. The string must
+    parse — directly or after faithful tail completion — as a JSON array
+    of objects; anything else is refused unchanged.
+    """
+
+    candidate = value.strip()
+    if not candidate.startswith("["):
+        return None
+    decoded: object
+    try:
+        decoded = json.loads(candidate)
+    except json.JSONDecodeError:
+        completed = _complete_json_payload(candidate)
+        if completed is None:
+            return None
+        try:
+            decoded = json.loads(completed)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(decoded, list) or not all(
+        isinstance(item, dict) for item in decoded
+    ):
+        return None
+    return cast("list[FileEdit]", decoded)
+
+
+_KIND_KEYS = frozenset({"kind", "path", "replacements", "content", "expected_sha256"})
+
+
+def _lift_flat_record(
+    record: Mapping[str, Any], *, path: str, digest: object
+) -> dict[str, Any]:
+    """Rebuild one flat ``{old_text,new_text}`` record as a kind-shaped update."""
+
+    return {
+        "kind": "update",
+        "path": path,
+        "expected_sha256": digest,
+        "replacements": [
+            {"old_text": record["old_text"], "new_text": record["new_text"]}
+        ],
+    }
+
+
+def _maybe_lift_flat_string_edits(arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Transmute a legacy flat-shape batch into the current record contract.
+
+    Two fault layers stack in the 2026-10-15 incident payloads: the ``edits``
+    array serialized into a JSON string (the 2026-10-14 fault) *and* records
+    shaped like the pre-Oct-1 ``{old_text,new_text}`` API. The lift source —
+    ``path``/``expected_sha256`` — lives beside ``edits``, not inside each
+    record, so this runs on the whole arguments object after the string
+    decode pass. Shape-preserving by construction: kind-shaped record edits,
+    flat records without a lift source, and unknown records pass through
+    untouched so shape validation still names the real contract.
+    """
+
+    edits = arguments.get("edits")
+    if isinstance(edits, str):
+        edits = _decode_string_edits(edits)
+    if not isinstance(edits, list) or not edits:
+        return arguments
+    lifted_path = arguments.get("path")
+    lifted_digest = arguments.get("expected_sha256")
+    if not isinstance(lifted_path, str) or not lifted_path:
+        return arguments
+    transmuted: list[Any] = []
+    for edit in edits:
+        if _is_flat_shape_edit(edit):
+            transmuted.append(
+                _lift_flat_record(edit, path=lifted_path, digest=lifted_digest)
+            )
+        else:
+            transmuted.append(edit)
+    lifted: dict[str, Any] = dict(arguments)
+    lifted["edits"] = transmuted
+    # The lift source is consumed by the transmutation; leaving ``path`` and
+    # ``expected_sha256`` in the arguments would shadow the record contract's
+    # own per-edit fields in future readers and mislead error messaging.
+    lifted.pop("path", None)
+    return lifted
+
+
+def _is_flat_shape_edit(edit: Any) -> bool:
+    """Report whether one edit value uses the pre-Oct-1 flat record shape.
+
+    The 2026-10-15 run echoed the legacy API from stale recalled context:
+    records carried only ``old_text``/``new_text`` — no ``kind``, ``path``,
+    or ``replacements`` — with ``path`` and ``expected_sha256`` lifted to
+    the arguments object.
+    """
+
+    return (
+        isinstance(edit, Mapping)
+        and not edit.keys() & _KIND_KEYS
+        and "old_text" in edit
+        and "new_text" in edit
+    )
 
 
 class Replacement(BaseModel):
@@ -59,8 +249,46 @@ class FileEdit(BaseModel):
 class Parameters(BaseModel):
     """Structured edit request for one owned worktree."""
 
+    model_config = ConfigDict(strict=False)
+
     artifact_id: str = Field(min_length=1, max_length=100)
     edits: list[FileEdit] = Field(min_length=1, max_length=20)
+
+    @field_validator("edits", mode="before")
+    @classmethod
+    def _accept_string_edits(cls, value: object) -> object:
+        """Decode a string-typed ``edits`` payload before list validation.
+
+        Some providers serialize the array into a JSON string inside the
+        arguments object (glm-5.3:cloud, 2026-10-14 incident: repeated
+        ``edits → Input should be a valid list`` rejections burned a 20-call
+        cap window). The string must decode to a JSON array of dict-shaped
+        edits under the same length bound; anything else passes through so
+        the pydantic error names the real shape.
+        """
+
+        if isinstance(value, str) and len(value) <= 2_000_000:
+            decoded = _decode_string_edits(value)
+            if decoded is not None:
+                return decoded
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lift_flat_string_records(cls, data: object) -> object:
+        """Transmute legacy flat-shape batches before record validation.
+
+        The 2026-10-15 payloads stacked two faults: string-typed ``edits``
+        (the field validator above decodes that) and pre-Oct-1 flat records
+        ``{old_text,new_text}`` whose ``path``/``expected_sha256`` sit at the
+        arguments level. Running after string decoding, this sees either
+        shape for the edits value and rewrites only exact legacy signatures;
+        everything else passes through untouched.
+        """
+
+        if isinstance(data, Mapping):
+            return _maybe_lift_flat_string_edits(data)
+        return data
 
 
 @dataclass(frozen=True)
@@ -306,13 +534,32 @@ async def _checked_patch(
     return changed, patch
 
 
+def _validated_parameters(ctx: ToolExecutionContext) -> Parameters:
+    """Validate tool parameters, surfacing the pydantic error as tool text.
+
+    Pydantic ``ValidationError`` is a ``ValueError`` subclass; execute's
+    ``except (… ValueError)`` clause would otherwise mask the shape problem
+    behind ``tool_id``-empty failure text, so the translation happens here
+    where both call sites share the exact message.
+    """
+
+    try:
+        return Parameters.model_validate(ctx.parameters)
+    except ValidationError as exc:
+        raise CodingWorkflowError(
+            f"Tool '{TOOL_ID}' received invalid parameters: {exc}"
+        ) from exc
+
+
 async def preflight(ctx: ToolExecutionContext) -> ToolResult | None:
     """Reject an edit batch that cannot apply before it waits for approval."""
 
-    params = Parameters.model_validate(ctx.parameters)
+    params = _validated_parameters(ctx)
     try:
         config = get_coding_config(ctx)
-        artifact = await load_owned_artifact(ctx, artifact_id=params.artifact_id, config=config)
+        artifact = await load_owned_artifact(
+            ctx, artifact_id=params.artifact_id, config=config
+        )
         await _checked_patch(
             params, worktree=artifact_worktree(artifact, config=config), config=config
         )
@@ -324,8 +571,8 @@ async def preflight(ctx: ToolExecutionContext) -> ToolResult | None:
 async def execute(ctx: ToolExecutionContext) -> ToolResult:
     """Validate and apply all structured edits as one owned-worktree revision."""
 
-    params = Parameters.model_validate(ctx.parameters)
     try:
+        params = _validated_parameters(ctx)
         config = get_coding_config(ctx)
         artifact = await load_owned_artifact(
             ctx, artifact_id=params.artifact_id, config=config, claim=True

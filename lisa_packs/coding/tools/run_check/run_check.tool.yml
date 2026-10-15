@@ -5,3 +5,8 @@ exportable: true
 effect: write
 approval_required: true
 approval_preview: "run a configured code check in the owned worktree"
+# The check's own timeout_seconds (up to 1800) bounds its command; the
+# wrapper must outlive it (sdk/AUTHORING.md). A smaller wrapper bound can
+# never be sized to every session's checks — the 2026-10-15 incident burned
+# both `test` attempts on a 30s kernel default cancelling a 900s check.
+timeout_seconds: 1800

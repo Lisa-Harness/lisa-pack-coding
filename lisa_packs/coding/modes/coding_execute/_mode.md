@@ -102,10 +102,11 @@ named worktrees — one per change set — and keep each focused so it merges
 cleanly on its own.
 
 To replay an already-merged upstream commit (for example, one PR per
-existing commit), create the worktree with that commit as its
-`import_commit` and run `coding_import_commits` on it once; then verify,
-commit, and push as usual. Do not cherry-pick or rewrite upstream history
-any other way.
+existing commit), create the worktree with that commit's Git revision as its
+`import_commit` (full or short SHA, branch, tag, or HEAD — the tool resolves
+it to the full SHA) and run `coding_import_commits` with the same reference
+once; then verify, commit, and push as usual. Do not cherry-pick or rewrite
+upstream history any other way.
 
 For code-change tasks, finish only after the owned worktree has a real commit
 with all configured required checks passing on the committed content. Report

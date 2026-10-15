@@ -34,9 +34,19 @@ class Parameters(BaseModel):
     #: Optional model-chosen slug for the branch/worktree (e.g. "auth-refactor");
     #: falls back to a random id so unnamed worktrees stay colliding-free.
     name: str = Field(default="", max_length=100)
-    #: Optional base tip: branch at this commit instead of the source HEAD
-    #: (e.g. the parent of an upstream commit meant for coding_import_commits).
-    import_commit: str = Field(default="", pattern=r"^$|^[0-9a-f]{40}$")
+    #: Optional base tip: branch at this Git revision instead of the source HEAD
+    #: (e.g. an upstream commit meant for coding_import_commits). Any commit-ish
+    #: revision expression is accepted and verified; the resolved full commit
+    #: SHA is what gets recorded on the artifact.
+    import_commit: str = Field(
+        default="",
+        max_length=200,
+        description=(
+            "Optional Git revision (full or short SHA, branch, tag, or HEAD) the"
+            " worktree base anchors to for coding_import_commits; resolved to"
+            " that revision's full commit SHA. Empty branches at the source HEAD."
+        ),
+    )
 
 
 def _branch_name(prefix: str, slug: str) -> str:
@@ -60,24 +70,26 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
                 base.stderr.strip() or "Cannot resolve the source HEAD."
             )
         base = base.stdout.strip()
+        import_commit = ""
         if params.import_commit:
             exists = await run_git(
                 source_root,
-                ("rev-parse", "--verify", f"{params.import_commit}^{{commit}}"),
+                ("rev-parse", "--verify", "--quiet", f"{params.import_commit}^{{commit}}"),
                 config=config,
             )
-            if exists.return_code != 0:
+            if exists.return_code != 0 or not exists.stdout.strip():
                 raise CodingWorkflowError(f"Unknown import commit '{params.import_commit}'.")
-            parent = await run_git(
+            resolved = await run_git(
                 source_root,
-                ("rev-parse", f"{params.import_commit}^"),
+                ("rev-parse", "--verify", "--quiet", f"{params.import_commit}^"),
                 config=config,
             )
-            if parent.return_code != 0 or not parent.stdout.strip():
+            if resolved.return_code != 0 or not resolved.stdout.strip():
                 raise CodingWorkflowError(
                     "import_commit has no parent; the worktree base cannot match it."
                 )
-            base = parent.stdout.strip()
+            base = resolved.stdout.strip()
+            import_commit = exists.stdout.strip()
         named = bool(params.name.strip())
         slug = _normalize_name(params.name) if named else str(uuid4().hex[:12])
         artifact = WorkProduct(
@@ -93,7 +105,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             head_sha=base,
             branch=_branch_name(config.branch_prefix, slug),
             required_check_ids=list(config.required_check_ids),
-            import_commit=params.import_commit or "",
+            import_commit=import_commit,
             safe_summary=params.summary.strip(),
         )
         if (
@@ -109,8 +121,21 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         # The worktree must never land inside the source tree: the source
         # checkout stays untouched and the artifact owns one tree only.
         if worktree_parent.is_relative_to(source_root):
+            if config.worktree_dir:
+                raise CodingWorkflowError(
+                    "Resolved worktree directory must be outside the source workspace."
+                )
+            # With no explicit worktree_dir the default derives from the host
+            # data dir; a host that nests its data dir inside the workspace
+            # (data=/workspace/artifacts) makes that default land inside
+            # the source. Ask the operator to configure an explicit parent
+            # instead of failing with the bare guard text.
             raise CodingWorkflowError(
-                "Resolved worktree directory must be outside the source workspace."
+                "Resolved worktree directory must be outside the source workspace: "
+                "the host data dir lives inside the workspace, so the default "
+                "<data-dir>/git-worktrees/<workspace-name> is unusable. Set "
+                "worktree_dir to an absolute path outside the workspace in the "
+                "coding pack configuration."
             )
         # Unnamed worktrees keep the artifact-id directory (historical layout);
         # named worktrees use the slug so the tree is self-describing.
