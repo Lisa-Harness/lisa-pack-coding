@@ -296,12 +296,6 @@ resources:
             argv: ["/home/you/Code/lisa/.venv/bin/python", "-m", "mypy", "src"]
             timeout_seconds: 180
         required_check_ids: [unit, type]
-        # Bounds (defaults shown); all are validated mins/maxes in config.py
-        max_file_bytes: 512000
-        max_read_lines: 400
-        max_patch_bytes: 200000
-        max_command_output_bytes: 100000
-        git_timeout_seconds: 60
       lisa-pack-bwrap:
         sandbox:
           floor:
@@ -311,7 +305,8 @@ resources:
             paths:
               # Worktree parent (default <data-dir>/git-worktrees/<workspace-name>
               # unless worktree_dir is set) — grant rw so checks can write there.
-              /home/you/.lisa/git-worktrees/my-project: rw
+              /home/you/.lisa/git-worktrees: rw
+              /home/you/yourcode: rw
 routing:
   # Optional: route natural-language shell intent elsewhere; this pack is
   # tool-only and has no start_mode.
@@ -337,12 +332,12 @@ Support is per-tool, uniform across the source workspace and owned worktrees:
 - **`coding_outline_source` — language-aware, four languages.** Dispatched on
   file extension in
   [outline_source.py](lisa_packs/coding/tools/outline_source/outline_source.py):
-  - **Python** (`.py`) — parsed with the real `ast` module: top-level classes,
+  - **Python** (`.py`) — *(active)* parsed with the real `ast` module: top-level classes,
     functions, and methods, with an `async` flag and exact line numbers.
   - **TypeScript / JavaScript** (`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`)
     — regex-based: `class`/`function`/`interface`/`type` declarations and
     arrow-function `const/let/var` assignments (line-accurate, no full parse).
-  - **Go** (`.go`) — regex-based, exploiting gofmt's column-0 guarantee:
+  - **Go** (`.go`) — *(active)* regex-based, exploiting gofmt's column-0 guarantee:
     top-level `func`s (with an optional type-parameter list), methods
     (`func (recv) Name`), and named `struct`/`interface` types. `var`/`const`
     and anonymous funcs are intentionally ignored.
