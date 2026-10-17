@@ -200,6 +200,54 @@ with `execution: sandbox`, `persistence: direct-write`, and an explicit `rw`
 grant covering the owned worktree. Missing authorization, a degraded sandbox,
 or a changed candidate tree fails the check without running it on the host.
 
+### Sandbox floor contribution (`lisa.extensions.sandbox_floors`)
+
+The worktree parent is a **runtime-derived** path
+(`resolve_worktree_parent`: explicit `worktree_dir`, else
+`<data_dir>/git-worktrees/<workspace>`) — the harness cannot know it when
+hand-authoring the session floor. The **language-platform cache roots**
+are the same class of need: the toolchain — not the harness — sets the
+location (uv: `~/.cache/uv`; Go: `~/.cache/go-build` + `~/go/pkg/mod`; the
+Go-era floor carried exactly those by hand). [sandbox.py](lisa_packs/coding/sandbox.py)
+declares both through the `lisa.extensions.sandbox_floors` entry point:
+
+```python
+def floor_contribution(pack_config, context):
+    config = CodingPackConfig.model_validate(dict(pack_config))
+    worktree_parent = config.resolve_worktree_parent(
+        data_dir=str(context.get("data_dir") or ""),
+        source_root=config.resolve_workspace_root(),
+    ).resolve()
+    return {
+        "execution": "sandbox",
+        "persistence": "direct-write",
+        "paths": {
+            str(worktree_parent): "rw",
+            str(workspace): "rw",
+            # + cache roots derived from the configured checks/recipes
+        },
+    }
+```
+
+The runtime merges this exclusively onto the harness-authored
+`lisa-pack-bwrap` floor at session assembly (see the
+[harness pack authoring guide](https://github.com/Lisa-Harness/lisa/blob/main/docs/PACK_AUTHORING_GUIDE.md)
+and `kernel.sandbox_floor`), so the floor and the actual worktree location
+can never drift apart — the failure mode behind the 2026-10-14
+`coding_run_check` abort ("bwrap sandbox floor does not permit worktree
+writes" after the data-dir switch). The contribution is derived from the
+same `resolve_worktree_parent` the worktree tools use, so resolution changes
+flow into the floor automatically. Cache roots are detected from the
+*configured* check/recipe argv (a `uv` argv contributes `~/.cache/uv`; a
+`go` argv contributes the Go caches) and only when they exist on the host —
+floor `rw` binds have no existence filter, so a missing cache directory
+contributes nothing rather than aborting every run. The sandbox child env
+passes `HOME` and no `*_CACHE_DIR` overrides, so a tool's default cache
+resolves identically inside and outside the sandbox: binding the default
+is correct by construction. Network is deliberately *not* contributed:
+whether a preparation recipe needs network is toolchain-dependent; a recipe
+that needs it under a `deny` floor fails at recipe time with a precise cause.
+
 ## Configuration
 
 Typed, frozen, `extra="forbid"` — [config.py](lisa_packs/coding/config.py)

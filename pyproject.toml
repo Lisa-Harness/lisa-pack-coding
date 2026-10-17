@@ -37,3 +37,6 @@ coding = "lisa_packs.coding:get_content_root"
 
 [project.entry-points."lisa.extensions.host_commands"]
 coding-copilot = "lisa_packs.coding.copilot_commands:get_host_commands"
+
+[project.entry-points."lisa.extensions.sandbox_floors"]
+coding = "lisa_packs.coding.sandbox:floor_contribution"
