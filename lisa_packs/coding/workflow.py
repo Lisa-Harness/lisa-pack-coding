@@ -115,7 +115,9 @@ async def _feed_and_wait(
         except (BrokenPipeError, ConnectionResetError):
             pass  # The child exited without reading; its exit status reports why.
         process.stdin.close()
-    return await process.wait()
+    while process.returncode is None:
+        await asyncio.sleep(0.01)
+    return process.returncode
 
 
 def _kill_group(process: asyncio.subprocess.Process) -> None:

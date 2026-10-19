@@ -172,7 +172,7 @@ async def test_cancellation_kills_the_whole_process_group(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_lost_exit_notification_still_returns_at_the_deadline(
+async def test_lost_wait_notification_does_not_hide_a_completed_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def never_notified(self: asyncio.subprocess.Process) -> int:
@@ -190,7 +190,7 @@ async def test_lost_exit_notification_still_returns_at_the_deadline(
         ),
         timeout=10,
     )
-    assert result.timed_out
+    assert result.return_code == 0 and not result.timed_out
 
 
 @pytest.mark.asyncio
