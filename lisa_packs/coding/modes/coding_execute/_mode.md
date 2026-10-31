@@ -77,6 +77,12 @@ Capture relevant learnings to aid in future changes.
 Use `coding_apply_patch` to apply existing unified diff files,
 but not as the default way to author text changes.
 Run `coding_run_check` to validate your changes.
+After each round of edits, run the session's fix checks first (formatters
+and autofixers, listed as `fix_check_ids` by `coding_status`) and then the
+verify checks: fix-check edits change the tree, so a verify result recorded
+before them is stale — rerun the verify checks whenever a fix check reports
+new edits. Mechanical lint and formatting violations are the fix checks'
+job; hand-edit only what they leave behind.
 Before the first check on a worktree, run `coding_prepare_workspace` with the
 artifact id: `coding_run_check` refuses to run until the workspace preparation
 is current, and preparing once gives every later check the same worktree-owned
