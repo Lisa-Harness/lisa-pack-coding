@@ -242,9 +242,10 @@ flow into the floor automatically. Cache roots are detected from the
 `go` argv contributes the Go caches) and only when they exist on the host —
 floor `rw` binds have no existence filter, so a missing cache directory
 contributes nothing rather than aborting every run. The sandbox child env
-passes `HOME` and no `*_CACHE_DIR` overrides, so a tool's default cache
-resolves identically inside and outside the sandbox: binding the default
-is correct by construction. Network is deliberately *not* contributed:
+passes `HOME` and no `*_CACHE_DIR` overrides, and the bwrap owner normalizes
+`TMPDIR` to the namespace's writable `/tmp` (`--tmpfs /tmp`), so temp files
+never resolve through a masked or read-only host path: a preparation recipe
+needs no `env TMPDIR=` prefix. Network is deliberately *not* contributed:
 whether a preparation recipe needs network is toolchain-dependent; a recipe
 that needs it under a `deny` floor fails at recipe time with a precise cause.
 
@@ -497,8 +498,8 @@ through `__file__`; PEP 420 namespace modules through every `__path__` entry —
 a workspace whose own source tree is a namespace, like the Lisa workspace's
 `sdk`, must prepare), and records baseline evidence. It then exercises
 hash-guarded edits, failing checks, blocked commit, repair, passing checks,
-commit, and cleanup. Missing ignore rules for `.venv/` or `.lisa-tmp/` must
-fail before creating runtime paths. The source checkout is preserved and the
+commit, and cleanup. A missing ignore rule for `.venv/` must fail before
+creating runtime paths. The source checkout is preserved and the
 successful run writes a JSON trajectory under pytest's temporary directory.
 No model calls or downloads.
 

@@ -946,7 +946,7 @@ async def test_configured_preparation_blocks_checks_until_current(tmp_path: Path
     recipes = [
         {
             "id": "python-uv",
-            "prepare_argv": ("env", "TMPDIR=.lisa-tmp", "uv", "sync", "--locked", "--no-cache"),
+            "prepare_argv": ("env", "UV_OFFLINE=1", "uv", "sync", "--locked", "--no-cache"),
             "project_modules": ["app"],
         }
     ]
@@ -1058,7 +1058,7 @@ def test_recipe_prepare_argv_is_session_owned_and_digested(tmp_path: Path) -> No
     root.mkdir()
     recipe = {
         "id": "python-uv",
-        "prepare_argv": ("env", "TMPDIR=.lisa-tmp", "uv", "sync", "--locked", "--no-cache"),
+        "prepare_argv": ("env", "UV_OFFLINE=1", "uv", "sync", "--locked", "--no-cache"),
         "project_modules": ["app"],
     }
     config = get_coding_config(
@@ -1074,7 +1074,7 @@ def test_recipe_prepare_argv_is_session_owned_and_digested(tmp_path: Path) -> No
     resolved = config.preparation_recipe("python-uv")
     assert resolved.prepare_argv == (
         "env",
-        "TMPDIR=.lisa-tmp",
+        "UV_OFFLINE=1",
         "uv",
         "sync",
         "--locked",
@@ -1084,7 +1084,7 @@ def test_recipe_prepare_argv_is_session_owned_and_digested(tmp_path: Path) -> No
     # preparation evidence recorded under the old vector must go stale.
     mutated = CodingPreparationRecipe(
         id="python-uv",
-        prepare_argv=("env", "TMPDIR=.lisa-tmp", "uv", "sync", "--locked"),
+        prepare_argv=("env", "UV_OFFLINE=1", "uv", "sync", "--locked"),
         project_modules=("app",),
     )
     assert preparation_recipe_digest(resolved) != preparation_recipe_digest(mutated)

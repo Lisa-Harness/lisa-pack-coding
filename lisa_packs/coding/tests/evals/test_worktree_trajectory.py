@@ -353,7 +353,7 @@ async def _python_preparation_fixture(
     files = {
         ".gitignore": "".join(
             path + "\n"
-            for path in (".venv/", ".lisa-tmp/", "__pycache__/")
+            for path in (".venv/", "__pycache__/")
             if path != unignored_path
         ),
         ".python-version": sys.version.split()[0] + "\n",
@@ -408,7 +408,7 @@ async def _python_preparation_fixture(
                     "id": "python-uv",
                     "prepare_argv": [
                         "env",
-                        "TMPDIR=.lisa-tmp",
+                        "UV_OFFLINE=1",
                         "uv",
                         "sync",
                         "--locked",
@@ -448,7 +448,7 @@ async def _assert_python_preparation(
 
 @pytest.mark.eval
 @pytest.mark.asyncio
-@pytest.mark.parametrize("unignored_path", [None, ".venv/", ".lisa-tmp/"])
+@pytest.mark.parametrize("unignored_path", [None, ".venv/"])
 async def test_real_python_preparation_and_repair_trajectory(
     tmp_path: Path,
     catalog: dict[str, dict[str, object]],
@@ -482,7 +482,6 @@ async def test_real_python_preparation_and_repair_trajectory(
         assert rejected is not None and rejected.preparation is not None
         assert rejected.preparation.status == "failed"
         assert not (worktree / ".venv").exists()
-        assert not (worktree / ".lisa-tmp").exists()
         cleaned = await _step(
             catalog, factory, trajectory, "coding_cleanup_worktree", {"artifact_id": artifact_id}
         )

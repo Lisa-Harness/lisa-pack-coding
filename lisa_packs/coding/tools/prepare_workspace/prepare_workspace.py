@@ -72,15 +72,14 @@ class Parameters(BaseModel):
     recipe_id: str | None = Field(default=None, min_length=1, max_length=80)
 
 
-async def _require_ignored_runtime_paths(worktree: Path, *, config) -> None:
-    for path in (".venv", ".lisa-tmp"):
-        result = await run_git(
-            worktree, ("check-ignore", "-q", "--", f"{path}/"), config=config
+async def _require_venv_ignored(worktree: Path, *, config) -> None:
+    result = await run_git(
+        worktree, ("check-ignore", "-q", "--", ".venv/"), config=config
+    )
+    if result.return_code != 0:
+        raise CodingWorkflowError(
+            ".venv must be ignored before preparing a workspace."
         )
-        if result.return_code != 0:
-            raise CodingWorkflowError(
-                f"{path} must be ignored before preparing a workspace."
-            )
 
 
 def _record_baseline_check(
@@ -125,20 +124,9 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             ctx, artifact_id=params.artifact_id, config=config, claim=True
         )
         worktree = artifact_worktree(artifact, config=config)
-        await _require_ignored_runtime_paths(worktree, config=config)
+        await _require_venv_ignored(worktree, config=config)
         manifest_digest = dependency_manifest_digest(worktree, recipe=recipe)
         recipe_digest = preparation_recipe_digest(recipe)
-        temporary_directory = await run_contained(
-            ctx,
-            ("mkdir", "-p", ".lisa-tmp"),
-            worktree=worktree,
-            timeout_seconds=recipe.timeout_seconds,
-        )
-        if temporary_directory.timed_out or temporary_directory.return_code != 0:
-            raise CodingWorkflowError(
-                temporary_directory.stderr.strip()
-                or "Could not create workspace temporary directory."
-            )
         prepared = await run_contained(
             ctx,
             expand_argv_placeholders(recipe.prepare_argv, worktree=worktree),
