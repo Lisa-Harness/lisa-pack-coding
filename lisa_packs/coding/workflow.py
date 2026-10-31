@@ -26,6 +26,7 @@ from lisa_packs.coding.config import (
 from lisa_packs.coding.local_files import CodingPathError, resolve_relative_path
 
 __all__ = [
+    "ArtifactIdValueError",
     "CodingWorkflowError",
     "ProcessResult",
     "ReadableRoot",
@@ -48,6 +49,7 @@ __all__ = [
     "run_git",
     "run_process",
     "tree_changes",
+    "validate_artifact_id",
     "workspace_python",
     "worktree_tree_sha",
 ]
@@ -62,6 +64,40 @@ _GIT_BACKGROUND_ENV = {"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
 
 class CodingWorkflowError(RuntimeError):
     """Raised for a failed coding workflow precondition or bounded command."""
+
+
+class ArtifactIdValueError(ValueError):
+    """Raised when ``artifact_id`` arrives as a mistyped no-artifact sentinel.
+
+    The read tools' ``artifact_id`` is optional: JSON ``null`` (or omission)
+    selects the source workspace, and a non-empty id selects an owned
+    worktree. Providers occasionally encode the sentinel as the *string*
+    ``"null"`` or the empty string (glm-5.3-flashx, 2026-10-31 incident: the
+    bare pydantic ``string_too_short`` / ``Unknown code change artifact
+    'null'`` errors gave the model no recovery and it abandoned file reads).
+    Raising this subclass keeps the rejection loud while the message states
+    the actual contract, so the model can correct the call in place.
+    """
+
+
+def validate_artifact_id(value: object) -> object:
+    """Reject mistyped ``artifact_id`` sentinels with an actionable message.
+
+    A ``before`` validator for the read tools' ``artifact_id`` field. Real
+    values and proper ``None`` pass through untouched; the mistyped
+    sentinels raise :class:`ArtifactIdValueError` naming the two valid
+    encodings. Any other non-empty string is a plausibly real id and passes
+    through so downstream lookup reports unknown ids normally.
+    """
+
+    if isinstance(value, str) and value.strip().lower() in {"null", "none", ""}:
+        raise ArtifactIdValueError(
+            "artifact_id must be a non-empty artifact id, or JSON null "
+            "(omit the field) to read the source workspace; got the "
+            f"{value!r} string."
+        )
+    return value
+
 
 
 @dataclass(frozen=True, slots=True)

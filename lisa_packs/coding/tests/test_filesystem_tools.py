@@ -120,3 +120,27 @@ async def test_find_and_search_treat_injection_shaped_input_as_data(tmp_path: Pa
     searched = await search_code(_context(root, {"query": "$(New-Item injected.txt)"}))
     assert marker.exists() is False
     assert searched.error == "" or "ripgrep" in searched.error
+
+
+def test_mistyped_artifact_id_sentinel_names_the_contract() -> None:
+    """``"null"``/``""`` sentinels reject with the JSON-null contract, not bare pydantic."""
+
+    from pydantic import ValidationError
+
+    from lisa_packs.coding.tools.find_files.find_files import Parameters as FindFiles
+    from lisa_packs.coding.tools.read_file.read_file import Parameters as ReadFile
+    from lisa_packs.coding.tools.search_code.search_code import Parameters as SearchCode
+    from lisa_packs.coding.workflow import ArtifactIdValueError, validate_artifact_id
+
+    for params_cls in (ReadFile, SearchCode, FindFiles):
+        for sentinel in ("null", "", "None"):
+            with pytest.raises(ValidationError) as caught:
+                params_cls.model_validate({"artifact_id": sentinel, "path": "src/main.py"})
+            text = str(caught.value)
+            assert "JSON null" in text, (params_cls, sentinel, text)
+            assert "string_too_short" not in text
+
+    with pytest.raises(ArtifactIdValueError):
+        validate_artifact_id("null")
+    assert validate_artifact_id(None) is None
+    assert validate_artifact_id("abc123") == "abc123"

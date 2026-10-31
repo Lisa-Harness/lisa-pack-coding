@@ -12,8 +12,12 @@ from lisa_packs.coding.local_files import (
     relative_path,
     resolve_relative_path_at_root,
 )
-from lisa_packs.coding.workflow import CodingWorkflowError, readable_root
-from pydantic import BaseModel, Field
+from lisa_packs.coding.workflow import (
+    CodingWorkflowError,
+    readable_root,
+    validate_artifact_id,
+)
+from pydantic import BaseModel, Field, field_validator
 
 TOOL_ID = "coding_list_directory"
 
@@ -21,10 +25,22 @@ TOOL_ID = "coding_list_directory"
 class Parameters(BaseModel):
     """Structured directory listing request."""
 
-    artifact_id: str | None = Field(default=None, min_length=1, max_length=100)
+    artifact_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        description="Owned worktree's artifact id. Omit (JSON null) to list the source workspace.",
+    )
     scope: Literal["auto", "source", "worktree"] = "auto"
     path: str = Field(default="", description="Relative workspace directory, or empty for root.")
     max_entries: int = Field(default=100, ge=1, le=1000)
+
+    @field_validator("artifact_id", mode="before")
+    @classmethod
+    def _reject_mistyped_artifact_id(cls, value: object) -> object:
+        """Surface the JSON-null contract when the sentinel arrives mistyped."""
+
+        return validate_artifact_id(value)
 
 
 async def execute(ctx: ToolExecutionContext) -> ToolResult:

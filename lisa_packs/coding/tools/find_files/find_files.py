@@ -13,8 +13,12 @@ from lisa_packs.coding.local_files import (
     relative_path,
     resolve_relative_path_at_root,
 )
-from lisa_packs.coding.workflow import CodingWorkflowError, readable_root
-from pydantic import BaseModel, Field
+from lisa_packs.coding.workflow import (
+    CodingWorkflowError,
+    readable_root,
+    validate_artifact_id,
+)
+from pydantic import BaseModel, Field, field_validator
 
 TOOL_ID = "coding_find_files"
 
@@ -22,11 +26,23 @@ TOOL_ID = "coding_find_files"
 class Parameters(BaseModel):
     """Structured file matching request."""
 
-    artifact_id: str | None = Field(default=None, min_length=1, max_length=100)
+    artifact_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        description="Owned worktree's artifact id. Omit (JSON null) to search the source tree.",
+    )
     scope: Literal["auto", "source", "worktree"] = "auto"
     pattern: str = Field(default="*", min_length=1, max_length=200)
     path: str = Field(default="", description="Optional relative directory to search.")
     max_results: int = Field(default=50, ge=1, le=200)
+
+    @field_validator("artifact_id", mode="before")
+    @classmethod
+    def _reject_mistyped_artifact_id(cls, value: object) -> object:
+        """Surface the JSON-null contract when the sentinel arrives mistyped."""
+
+        return validate_artifact_id(value)
 
 
 async def execute(ctx: ToolExecutionContext) -> ToolResult:

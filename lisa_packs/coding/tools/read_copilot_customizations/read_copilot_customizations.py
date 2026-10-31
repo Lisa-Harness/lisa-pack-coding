@@ -10,11 +10,14 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
-
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import get_coding_config
-from lisa_packs.coding.workflow import CodingWorkflowError, readable_root
+from lisa_packs.coding.workflow import (
+    CodingWorkflowError,
+    readable_root,
+    validate_artifact_id,
+)
+from pydantic import BaseModel, Field, field_validator
 from sdk.content import (
     AgentFile,
     CopilotInstructionsFile,
@@ -41,12 +44,24 @@ class Parameters(BaseModel):
             "instructions whose applyTo glob matches this path are returned."
         ),
     )
-    artifact_id: str | None = Field(default=None, min_length=1, max_length=100)
+    artifact_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        description="Owned worktree's artifact id. Omit (JSON null) to read the source workspace.",
+    )
     scope: Literal["auto", "source", "worktree"] = "auto"
     kind: KindFilter = Field(
         default="all",
         description="Restrict the result to one customization kind.",
     )
+
+    @field_validator("artifact_id", mode="before")
+    @classmethod
+    def _reject_mistyped_artifact_id(cls, value: object) -> object:
+        """Surface the JSON-null contract when the sentinel arrives mistyped."""
+
+        return validate_artifact_id(value)
 
 
 async def execute(ctx: ToolExecutionContext) -> ToolResult:

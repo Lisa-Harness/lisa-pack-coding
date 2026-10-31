@@ -13,8 +13,12 @@ from lisa_packs.coding.local_files import (
     read_text_file,
     resolve_relative_path_at_root,
 )
-from lisa_packs.coding.workflow import CodingWorkflowError, readable_root
-from pydantic import BaseModel, Field
+from lisa_packs.coding.workflow import (
+    CodingWorkflowError,
+    readable_root,
+    validate_artifact_id,
+)
+from pydantic import BaseModel, Field, field_validator
 
 TOOL_ID = "coding_outline_source"
 _TS_DECLARATION = re.compile(
@@ -46,9 +50,21 @@ _RS_FN = re.compile(
 class Parameters(BaseModel):
     """Structured source outline request."""
 
-    artifact_id: str | None = Field(default=None, min_length=1, max_length=100)
+    artifact_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        description="Owned worktree's artifact id. Omit (JSON null) to outline the source tree.",
+    )
     scope: Literal["auto", "source", "worktree"] = "auto"
     path: str = Field(min_length=1)
+
+    @field_validator("artifact_id", mode="before")
+    @classmethod
+    def _reject_mistyped_artifact_id(cls, value: object) -> object:
+        """Surface the JSON-null contract when the sentinel arrives mistyped."""
+
+        return validate_artifact_id(value)
 
 
 def _python_outline(source: str) -> list[dict[str, object]]:
