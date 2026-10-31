@@ -36,6 +36,7 @@ __all__ = [
     "artifact_worktree",
     "candidate_tree_sha",
     "changed_paths",
+    "checkpoint_prefix",
     "dependency_manifest_digest",
     "expand_argv_placeholders",
     "expand_check_argv",
@@ -43,6 +44,7 @@ __all__ = [
     "patch_paths",
     "preparation_is_current",
     "preparation_recipe_digest",
+    "prune_checkpoint_tags",
     "readable_root",
     "restore_tree_paths",
     "run_contained",
@@ -549,6 +551,42 @@ def artifact_owner_matches(artifact: WorkProduct, ctx: ToolExecutionContext) -> 
     """
 
     return artifact.belongs_to(ctx)
+
+
+def checkpoint_prefix(config: CodingPackConfig) -> str:
+    """Return the reserved checkpoint-tag namespace under the branch prefix."""
+
+    normalized = (
+        config.branch_prefix
+        if config.branch_prefix.endswith("/")
+        else f"{config.branch_prefix}/"
+    )
+    return f"{normalized}ckpt/"
+
+
+async def prune_checkpoint_tags(
+    artifact: WorkProduct, *, root: Path, config: CodingPackConfig
+) -> tuple[list[str], list[str]]:
+    """Delete this artifact's checkpoint tags, returning deleted and failed ones.
+
+    Tags are repository-wide refs, so pruning runs from ``root`` (normally the
+    source checkout) and keeps working after the owned worktree is gone. Every
+    checkpoint of the artifact is dead by the time callers prune: a push
+    freezes history against rewrites and rewinds, and a cleanup ends the
+    branch. Deletion is best-effort; a failed ``git tag -d`` never fails the
+    caller's op and the next prune retries the surviving ref.
+    """
+
+    pattern = f"{checkpoint_prefix(config)}{artifact.artifact_id[:8]}-*"
+    listed = await run_git(root, ("tag", "--list", pattern), config=config)
+    if listed.return_code != 0:
+        return [], []
+    deleted: list[str] = []
+    failed: list[str] = []
+    for name in listed.stdout.split():
+        removed = await run_git(root, ("tag", "-d", name), config=config)
+        (deleted if removed.return_code == 0 else failed).append(name)
+    return deleted, failed
 
 
 def artifact_worktree(

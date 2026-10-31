@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from kernel.models import ToolExecutionContext, ToolResult
+from pydantic import BaseModel, Field
+
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.workflow import (
     CodingWorkflowError,
@@ -11,9 +13,9 @@ from lisa_packs.coding.workflow import (
     artifact_worktree,
     candidate_tree_sha,
     load_owned_artifact,
+    prune_checkpoint_tags,
     run_git,
 )
-from pydantic import BaseModel, Field
 
 TOOL_ID = "coding_push"
 
@@ -43,7 +45,9 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         worktree = artifact_worktree(artifact, config=config)
         paths = list(dict.fromkeys(artifact.changed_paths))
         if not paths:
-            raise CodingWorkflowError("Artifact has no task-owned changed paths to verify.")
+            raise CodingWorkflowError(
+                "Artifact has no task-owned changed paths to verify."
+            )
         if not artifact_has_current_required_checks(
             artifact,
             candidate_tree=await candidate_tree_sha(worktree, config=config, paths=paths),
@@ -64,16 +68,25 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         artifact.pushed_sha = artifact.commit_sha
         artifact.status = "pushed"
         await ctx.code_change_artifact_store.save(artifact)
+        # A pushed branch is frozen: rewrites and rewinds past pushed_sha are
+        # refused, so every checkpoint tag for this artifact is now dead.
+        pruned, _prune_failed = await prune_checkpoint_tags(
+            artifact, root=config.resolve_workspace_root(), config=config
+        )
     except (CodingWorkflowError, OSError, ValueError) as exc:
         return ToolResult(tool_id=TOOL_ID, error=str(exc))
 
+    op_text = f"Pushed {artifact.branch} at {artifact.pushed_sha}."
+    if pruned:
+        op_text += f" Pruned {len(pruned)} checkpoint tag(s)."
     return ToolResult(
         tool_id=TOOL_ID,
-        output_text=f"Pushed {artifact.branch} at {artifact.pushed_sha}.",
+        output_text=op_text,
         output_json={
             "artifact_id": artifact.artifact_id,
             "branch": artifact.branch,
             "pushed_sha": artifact.pushed_sha,
             "remote": config.push_remote,
+            "pruned_checkpoint_tags": pruned,
         },
     )

@@ -2586,6 +2586,83 @@ async def test_history_squash_all_preserves_tree_and_checks(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_push_prunes_artifact_checkpoint_tags(tmp_path: Path) -> None:
+    """A successful push prunes this artifact's dead checkpoint tags only."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "prune-push"}))
+    artifact_id = created.output_json["artifact_id"]
+    await _commit_artifact(root, store, artifact_id, patch=_APP_PATCH, message="work")
+    worktree = Path(created.output_json["worktree_path"])
+
+    reword = await history(
+        _context(
+            root, store, {"artifact_id": artifact_id, "op": "reword", "message": "final"}
+        )
+    )
+    assert reword.error == "", reword.error
+    stale = f"lisa/ckpt/{artifact_id[:8]}-stale"
+    await _git(worktree, "tag", stale, "HEAD")
+
+    pushed = await push(_context(root, store, {"artifact_id": artifact_id}))
+    assert pushed.error == "", pushed.error
+    pruned = pushed.output_json["pruned_checkpoint_tags"]
+    assert reword.output_json["checkpoint_tag"] in pruned
+    assert stale in pruned
+    tags = (await _git_out(worktree, "tag", "--list")).splitlines()
+    assert not [tag for tag in tags if tag.startswith("lisa/ckpt/")]
+    # Another artifact's checkpoints are untouched by the same prune.
+    other = await create_worktree(
+        _context(root, store, {"name": "other-artifact", "summary": "other"})
+    )
+    assert other.error == ""
+    other_id = other.output_json["artifact_id"]
+    await _commit_artifact(root, store, other_id, patch=_APP_PATCH, message="other")
+    other_worktree = Path(other.output_json["worktree_path"])
+    other_marker = f"lisa/ckpt/{other_id[:8]}-keep"
+    await _git(other_worktree, "tag", other_marker, "HEAD")
+    again = await push(_context(root, store, {"artifact_id": artifact_id}))
+    assert again.error == "", again.error
+    assert again.output_json["pruned_checkpoint_tags"] == []
+    assert other_marker in (await _git_out(other_worktree, "tag", "--list")).splitlines()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_worktree_prunes_checkpoints_after_worktree_loss(
+    tmp_path: Path,
+) -> None:
+    """Cleanup prunes checkpoint tags from the source root even without a worktree."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    created = await create_worktree(_context(root, store, {"name": "prune-clean"}))
+    artifact_id = created.output_json["artifact_id"]
+    await _commit_artifact(root, store, artifact_id, patch=_APP_PATCH, message="work")
+    worktree = Path(created.output_json["worktree_path"])
+    squash = await history(
+        _context(
+            root, store, {"artifact_id": artifact_id, "op": "squash", "message": "one"}
+        )
+    )
+    assert squash.error == "", squash.error
+    tag = squash.output_json["checkpoint_tag"]
+    assert tag.startswith("lisa/ckpt/")
+    # Tags are repo-wide refs, so the worktree sees what the source root prunes.
+    assert tag in (await _git_out(worktree, "tag", "--list")).splitlines()
+
+    shutil.rmtree(worktree)
+    cleaned = await cleanup_worktree(
+        _context(root, store, {"artifact_id": artifact_id})
+    )
+    assert cleaned.error == "", cleaned.error
+    assert cleaned.output_json["already_removed"] is True
+    assert cleaned.output_json["pruned_checkpoint_tags"] == [tag]
+    remaining = (await _git_out(root, "tag", "--list", "lisa/ckpt/*")).splitlines()
+    assert not [name for name in remaining if name.startswith(tag.rsplit("-", 1)[0])]
+
+
+@pytest.mark.asyncio
 async def test_history_squash_onto_owned_target_keeps_earlier_commits(
     tmp_path: Path,
 ) -> None:

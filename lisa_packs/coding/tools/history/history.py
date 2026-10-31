@@ -16,6 +16,7 @@ from lisa_packs.coding.workflow import (
     CodingWorkflowError,
     artifact_branch_is_allowed,
     artifact_worktree,
+    checkpoint_prefix,
     load_owned_artifact,
     run_git,
 )
@@ -44,17 +45,6 @@ class Parameters(BaseModel):
     message: str = ""
     #: Create an annotated tag (requires ``message``).
     annotated: bool = False
-
-
-def _checkpoint_prefix(config: CodingPackConfig) -> str:
-    """Return the reserved checkpoint-tag namespace under the branch prefix."""
-
-    normalized = (
-        config.branch_prefix
-        if config.branch_prefix.endswith("/")
-        else f"{config.branch_prefix}/"
-    )
-    return f"{normalized}ckpt/"
 
 
 def _validate_tag_name(name: str, *, checkpoint_prefix: str) -> str:
@@ -226,7 +216,7 @@ async def _checkpoint(
 ) -> str:
     """Tag one lightweight checkpoint at ``head`` before any history rewrite."""
 
-    prefix = _checkpoint_prefix(config)
+    prefix = checkpoint_prefix(config)
     name = f"{prefix}{artifact.artifact_id[:8]}-r{artifact.revision}-{uuid4().hex[:8]}"
     tagged = await run_git(worktree, ("tag", name, head), config=config)
     if tagged.return_code != 0:
@@ -249,14 +239,14 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             )
         worktree = artifact_worktree(artifact, config=config)
         head, base = await _require_rewritable_state(artifact, worktree, config=config)
-        checkpoint_prefix = _checkpoint_prefix(config)
+        reserved_prefix = checkpoint_prefix(config)
         tree_before = await _head_tree(worktree, config=config)
         checkpoint_tag = ""
         details: dict[str, object] = {}
 
         if params.op == "tag":
             name = _validate_tag_name(
-                params.name.strip(), checkpoint_prefix=checkpoint_prefix
+                params.name.strip(), checkpoint_prefix=reserved_prefix
             )
             if await _tag_exists(worktree, config, name):
                 raise CodingWorkflowError(f"Tag '{name}' already exists.")

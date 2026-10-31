@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from kernel.models import ToolExecutionContext, ToolResult
+from pydantic import BaseModel, Field
+
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.workflow import (
     CodingWorkflowError,
     artifact_worktree,
     load_owned_artifact,
+    prune_checkpoint_tags,
     run_git,
 )
-from pydantic import BaseModel, Field
 
 TOOL_ID = "coding_cleanup_worktree"
 
@@ -56,20 +56,30 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             already_removed = True
         artifact.status = "cleaned"
         await ctx.code_change_artifact_store.save(artifact)
+        # Cleanup ends the artifact's branch for good; its checkpoint tags
+        # have nothing left to restore, so prune them from the source root,
+        # which also works when the worktree was already gone.
+        pruned, _prune_failed = await prune_checkpoint_tags(
+            artifact, root=source_root, config=config
+        )
     except (CodingWorkflowError, OSError, ValueError) as exc:
         return ToolResult(tool_id=TOOL_ID, error=str(exc))
 
+    op_text = (
+        f"Worktree for artifact {artifact.artifact_id} was already removed; "
+        "recorded it as cleaned."
+        if already_removed
+        else f"Cleaned owned worktree for artifact {artifact.artifact_id}."
+    )
+    if pruned:
+        op_text += f" Pruned {len(pruned)} checkpoint tag(s)."
     return ToolResult(
         tool_id=TOOL_ID,
-        output_text=(
-            f"Worktree for artifact {artifact.artifact_id} was already removed; "
-            "recorded it as cleaned."
-            if already_removed
-            else f"Cleaned owned worktree for artifact {artifact.artifact_id}."
-        ),
+        output_text=op_text,
         output_json={
             "artifact_id": artifact.artifact_id,
             "branch": artifact.branch,
             "already_removed": already_removed,
+            "pruned_checkpoint_tags": pruned,
         },
     )
