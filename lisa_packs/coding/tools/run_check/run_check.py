@@ -26,7 +26,6 @@ from lisa_packs.coding.workflow import (
     ProcessResult,
     artifact_worktree,
     candidate_tree_sha,
-    expand_check_argv,
     load_owned_artifact,
     preparation_is_current,
     restore_tree_paths,
@@ -106,10 +105,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             worktree, config=config, paths=artifact.changed_paths
         )
         result = await run_contained(
-            ctx,
-            expand_check_argv(check, worktree=worktree),
-            worktree=worktree,
-            timeout_seconds=check.timeout_seconds,
+            ctx, check.argv, worktree=worktree, timeout_seconds=check.timeout_seconds
         )
         after = await worktree_tree_sha(
             worktree, config=config, paths=artifact.changed_paths
@@ -158,7 +154,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             status=status,
             revision=artifact.revision,
             checked_tree_sha=candidate_tree,
-            argv=list(expand_check_argv(check, worktree=worktree)),
+            argv=list(check.argv),
             duration_ms=round(elapsed * 1000),
             stdout=result.stdout,
             stderr=result.stderr,

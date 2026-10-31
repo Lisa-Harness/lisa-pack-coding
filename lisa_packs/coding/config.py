@@ -8,12 +8,6 @@ from typing import Literal
 from kernel.models import ToolExecutionContext
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-#: The one placeholder session-authored command vectors (checks and
-#: preparation recipes) may use; the pack resolves it to the worktree-owned
-#: interpreter. Session text never expands it, and the pack invents nothing
-#: else. Single source of truth shared with the workflow helpers.
-ARGV_WORKSPACE_PYTHON = "{workspace_python}"
-
 __all__ = [
     "CodingCheck",
     "CodingPackConfig",
@@ -41,7 +35,8 @@ class CodingPreparationRecipe(BaseModel):
     The prepare command is a session-authored argument vector, exactly like
     the pack's checks: the pack owns the mechanics (sandbox containment,
     interpreter probe, baseline evidence), the session owns the toolchain.
-    ``{workspace_python}`` is the only placeholder, resolved like a check's.
+    No placeholders exist; a Python-shaped recipe addresses the worktree-owned
+    interpreter with ``uv run --no-sync``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -117,7 +112,6 @@ class CodingPackConfig(BaseModel):
         recipe_ids = [recipe.id for recipe in self.preparation_recipes]
         if len(recipe_ids) != len(set(recipe_ids)):
             raise ValueError("preparation_recipes must use unique IDs")
-        probes_interpreter = False
         for recipe in self.preparation_recipes:
             unknown_baseline = sorted(set(recipe.baseline_check_ids) - set(check_ids))
             if unknown_baseline:
@@ -125,7 +119,6 @@ class CodingPackConfig(BaseModel):
                     f"recipe '{recipe.id}' references unknown baseline checks: "
                     + ", ".join(unknown_baseline)
                 )
-            probes_interpreter = probes_interpreter or bool(recipe.project_modules)
             for raw in recipe.manifest_paths:
                 candidate = Path(raw)
                 if candidate.is_absolute() or ".." in candidate.parts:
@@ -133,16 +126,6 @@ class CodingPackConfig(BaseModel):
                         f"recipe '{recipe.id}' manifest path must be relative "
                         f"without traversal: {raw!r}"
                     )
-        if probes_interpreter:
-            checks_without_owned_python = [
-                check.id for check in self.checks if ARGV_WORKSPACE_PYTHON not in check.argv
-            ]
-            if checks_without_owned_python:
-                raise ValueError(
-                    "checks must include {workspace_python} when a preparation "
-                    "recipe declares project_modules: "
-                    + ", ".join(checks_without_owned_python)
-                )
         if any(branch in self.protected_branches for branch in ("", self.branch_prefix)):
             raise ValueError("branch_prefix must not be an empty or protected branch")
         if self.worktree_dir and not Path(self.worktree_dir).is_absolute():

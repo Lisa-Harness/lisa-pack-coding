@@ -398,7 +398,10 @@ async def _python_preparation_fixture(
             "checks": [
                 {
                     "id": "unit",
-                    "argv": ["{workspace_python}", "-m", "unittest", "-v"],
+                    "argv": [
+                        "uv", "run", "--no-sync", "--no-cache",
+                        "python", "-m", "unittest", "-v",
+                    ],
                     "timeout_seconds": 60,
                 }
             ],
@@ -435,7 +438,10 @@ async def _assert_python_preparation(
     preparation = artifact.preparation
     assert preparation.status == "ready"
     assert preparation.recipe_digest and preparation.dependency_manifest_digest
-    assert preparation.python_path == str(worktree / ".venv" / "bin" / "python")
+    assert (worktree / ".venv" / "bin" / "python").is_file()
+    probe_python = json.loads(preparation.probe_stdout)["python"]
+    assert Path(probe_python).is_absolute()
+    assert preparation.python_path == probe_python
     probe_origins = json.loads(preparation.probe_stdout)["origins"]
     assert probe_origins["app"] == str(worktree / "app.py")
     # A PEP 420 namespace project module has no __file__; the probe certifies

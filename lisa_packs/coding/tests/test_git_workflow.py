@@ -66,9 +66,7 @@ from lisa_packs.coding.config import (
 from lisa_packs.coding.workflow import (
     ProcessResult,
     dependency_manifest_digest,
-    expand_argv_placeholders,
     preparation_recipe_digest,
-    workspace_python,
 )
 
 
@@ -939,7 +937,9 @@ async def test_configured_preparation_blocks_checks_until_current(tmp_path: Path
     checks = [
         {
             "id": "unit",
-            "argv": ["{workspace_python}", "-c", "print('checked')"],
+            "argv": [
+                "uv", "run", "--no-sync", "python", "-c", "print('checked')"
+            ],
             "timeout_seconds": 30,
         }
     ]
@@ -1066,7 +1066,7 @@ def test_recipe_prepare_argv_is_session_owned_and_digested(tmp_path: Path) -> No
             root,
             MemoryWorkProductStore(),
             {},
-            checks=[{"id": "unit", "argv": ["{workspace_python}", "-c", "print('ok')"]}],
+            checks=[{"id": "unit", "argv": ["uv", "run", "--no-sync", "python", "-c", "print('ok')"]}],
             preparation_recipes=[recipe],
         )
     )
@@ -1089,19 +1089,16 @@ def test_recipe_prepare_argv_is_session_owned_and_digested(tmp_path: Path) -> No
     )
     assert preparation_recipe_digest(resolved) != preparation_recipe_digest(mutated)
 
-    # Placeholder resolution stays pack-owned and targets the owned venv.
-    expanded = expand_argv_placeholders(
-        ("{workspace_python}", "-c", "print('ok')"), worktree=root
-    )
-    assert expanded == (str(workspace_python(root)), "-c", "print('ok')")
 
+def test_module_declaring_recipe_is_author_free_form(tmp_path: Path) -> None:
+    """Recipes that probe an interpreter leave check argv entirely session-owned.
 
-def test_module_free_recipe_relaxes_the_workspace_python_rule(tmp_path: Path) -> None:
-    """The {workspace_python} rule applies exactly when a recipe probes one.
-
-    A Python-shaped recipe (project_modules declared) requires checks to run
-    under the owned interpreter; a toolchain-free recipe (no modules, e.g.
-    npm) leaves checks free-form.
+    The interpreter certification moved into the probe itself: preparation
+    runs ``uv run --no-sync python`` through the same interpreter address the
+    session's checks use, and its in-probe assertion certifies the owned venv.
+    Validation therefore no longer inspects check argv at all — a module-
+    declaring recipe accepts any session-authored vector, including bare
+    ``uv run`` forms and argv with no Python interpreter in it.
     """
 
     root = tmp_path / "source"
@@ -1118,21 +1115,22 @@ def test_module_free_recipe_relaxes_the_workspace_python_rule(tmp_path: Path) ->
     )
     assert config.preparation_recipes[0].project_modules == ()
 
-    # A module-declaring recipe keeps the strict rule: refusing it is loud.
-    with pytest.raises(ValidationError, match="workspace_python"):
-        CodingPackConfig.model_validate(
-            {
-                "workspace_root": str(root),
-                "checks": node_checks,
-                "preparation_recipes": [
-                    {
-                        "id": "python-uv",
-                        "prepare_argv": ("uv", "sync", "--locked"),
-                        "project_modules": ["app"],
-                    }
-                ],
-            }
-        )
+    # A module-declaring recipe no longer constrains how checks address the
+    # interpreter; mixed-toolchain configs parse unchanged.
+    parsed = CodingPackConfig.model_validate(
+        {
+            "workspace_root": str(root),
+            "checks": node_checks,
+            "preparation_recipes": [
+                {
+                    "id": "python-uv",
+                    "prepare_argv": ("uv", "sync", "--locked"),
+                    "project_modules": ["app"],
+                }
+            ],
+        }
+    )
+    assert parsed.checks[0].argv == ("npm", "run", "build")
 
 
 def test_recipe_manifest_paths_must_be_worktree_relative(tmp_path: Path) -> None:

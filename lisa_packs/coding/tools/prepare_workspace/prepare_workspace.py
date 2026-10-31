@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,13 +22,10 @@ from lisa_packs.coding.workflow import (
     artifact_worktree,
     candidate_tree_sha,
     dependency_manifest_digest,
-    expand_argv_placeholders,
-    expand_check_argv,
     load_owned_artifact,
     preparation_recipe_digest,
     run_contained,
     run_git,
-    workspace_python,
 )
 
 TOOL_ID = "coding_prepare_workspace"
@@ -128,22 +126,40 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         manifest_digest = dependency_manifest_digest(worktree, recipe=recipe)
         recipe_digest = preparation_recipe_digest(recipe)
         prepared = await run_contained(
-            ctx,
-            expand_argv_placeholders(recipe.prepare_argv, worktree=worktree),
-            worktree=worktree,
+            ctx, recipe.prepare_argv, worktree=worktree,
             timeout_seconds=recipe.timeout_seconds,
         )
         if prepared.timed_out or prepared.return_code != 0:
             detail = prepared.stderr.strip() or prepared.stdout.strip()
             raise CodingWorkflowError(detail or "Preparation command failed")
-        python = workspace_python(worktree)
+        python = worktree / ".venv" / (
+            "Scripts/python.exe" if os.name == "nt" else "bin/python"
+        )
+        venv_exists = python.is_file()
         probes_interpreter = bool(recipe.project_modules)
         probe_stdout = ""
         probe_stderr = ""
-        if python.is_file() and probes_interpreter:
+        if probes_interpreter and venv_exists:
+            # Run the probe exactly the way checks do: through the session's
+            # uv-mediated interpreter address, so its own sys.executable
+            # assertion certifies that uv run resolves to the owned venv
+            # rather than a PATH or host interpreter. ``--no-cache`` keeps
+            # the probe independent of a writable uv cache, which sandbox
+            # floors do not grant; the address itself is pack-owned
+            # mechanics, like the probe script.
             probed = await run_contained(
                 ctx,
-                (str(python), "-c", _PROBE, str(worktree), *recipe.project_modules),
+                (
+                    "uv",
+                    "run",
+                    "--no-sync",
+                    "--no-cache",
+                    "python",
+                    "-c",
+                    _PROBE,
+                    str(worktree),
+                    *recipe.project_modules,
+                ),
                 worktree=worktree,
                 timeout_seconds=recipe.timeout_seconds,
             )
@@ -162,7 +178,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         baseline_checks: dict[str, WorkProductCheck] = {}
         for check_id in recipe.baseline_check_ids:
             check = next(item for item in config.checks if item.id == check_id)
-            argv = expand_check_argv(check, worktree=worktree)
+            argv = check.argv
             started = time.perf_counter()
             result = await run_contained(
                 ctx, argv, worktree=worktree, timeout_seconds=check.timeout_seconds
@@ -182,8 +198,8 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             recipe_id=recipe.id,
             recipe_digest=recipe_digest,
             dependency_manifest_digest=manifest_digest,
-            environment_path=str(python.parent.parent) if python.is_file() else "",
-            python_path=str(python) if python.is_file() else "",
+            environment_path=str(python.parent.parent) if venv_exists else "",
+            python_path=str(python) if venv_exists else "",
             baseline_tree_sha=baseline_tree,
             baseline_checks=baseline_checks,
             probe_stdout=probe_stdout,

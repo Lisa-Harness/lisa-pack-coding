@@ -48,7 +48,7 @@ owned worktree, never the source checkout.
 | `coding_edit_files` | write | ✓ | Preferred editor: apply exact, hash-guarded replacements, creates, or deletes as one revision. Replacements match the original snapshot and must not overlap. The tool generates and prevalidates the Git patch, preserving supplied content and EOF newlines. |
 | `coding_apply_patch` | write | ✓ | Fallback for existing unified diffs: prevalidate (`git apply --check`) and apply a bounded patch. Bumps `revision`, records `changed_paths`, **clears `checks`** (stale results are invalidated). |
 | `coding_import_commits` | write | ✓ | Replay one already-merged upstream commit onto the owned worktree: the worktree must be created with `import_commit` (base = that commit's parent), the commit's diff applies as one patch revision, and `checks` are cleared. Rejects re-import before a commit/export, base drift, and empty commits. |
-| `coding_prepare_workspace` | write | ✓ | Run the session-configured preparation command (an argument vector in `preparation_recipes`, like a check's `argv`; `{workspace_python}` resolves to the worktree's owned interpreter) in the owned sandbox and record preparation evidence. Checks refuse to run until preparation is current. |
+| `coding_prepare_workspace` | write | ✓ | Run the session-configured preparation command (an argument vector in `preparation_recipes`, exactly like a check's `argv`) in the owned sandbox and record preparation evidence. Checks refuse to run until preparation is current. |
 | `coding_run_check` | write | ✓ | Run one named check through the bwrap owner's direct-write sandbox floor. Result records the current revision and candidate-tree hash; no host fallback. A `verify` check that rewrites files fails and its edits are reverted; a `fix` check's edits become a new revision (like a patch) and stale the other checks. |
 | `coding_commit` | write | ✓ | Stage commit candidates and commit only after required checks passed for this revision and tree, on the owned unprotected branch. The message may be any length and span multiple lines. Committing clears pending `imported_commits` state (the imported content is carried by the commit). |
 | `coding_history` | write | ✓ | Slice and dice the owned branch's committed history: `tag`/`tag_delete` (owned commits only), `restore` (rewind to any existing tag's commit, including `<branch_prefix>ckpt/` checkpoints), `reword`, `squash` (fold owned commits into one; `target` keeps everything at or below it as a parent), or `rebase` (`--onto` a new base given as any Git revision — SHA or branch name — auto-abort on conflict; use it as soon as the source tip moves past the artifact base). Every rewrite first tags a checkpoint; a rewrite that leaves the tree byte-identical keeps recorded checks, any content change clears them. Refuses rewrites of already-pushed commits; protected branches and the source checkout are untouchable. |
@@ -336,13 +336,13 @@ resources:
         push_remote: origin
         checks:
           - id: format
-            argv: ["/home/you/Code/lisa/.venv/bin/python", "-m", "ruff", "format", "."]
+            argv: ["uv", "run", "--no-sync", "--no-cache", "python", "-m", "ruff", "format", "."]
             kind: fix  # rewrites files; its edits become a new revision
           - id: unit
-            argv: ["/home/you/Code/lisa/.venv/bin/python", "-m", "pytest", "-q"]
+            argv: ["uv", "run", "--no-sync", "--no-cache", "python", "-m", "pytest", "-q"]
             timeout_seconds: 300
           - id: type
-            argv: ["/home/you/Code/lisa/.venv/bin/python", "-m", "mypy", "src"]
+            argv: ["uv", "run", "--no-sync", "--no-cache", "python", "-m", "mypy", "src"]
             timeout_seconds: 180
         required_check_ids: [unit, type]
       lisa-pack-bwrap:
@@ -364,8 +364,13 @@ routing:
 
 With this plan, a change is gated: `coding_apply_patch` bumps the revision and
 clears check results; both `unit` and `type` must re-pass on the candidate tree
-or `coding_commit` returns an error. Use absolute interpreter paths in `argv`
-(the bounded executor does no shell PATH lookups).
+or `coding_commit` returns an error. Address the interpreter with the
+worktree-owned toolchain, e.g.
+`uv run --no-sync --no-cache …` — the bounded executor does no shell PATH
+lookups for Python and a bare `python` would run whatever the sandbox image
+provides (or fail; `uv` itself is resolved on PATH). `--no-cache` keeps
+sandboxed runs independent of a writable uv cache, which containment floors
+typically do not grant.
 
 ## Language support
 

@@ -18,8 +18,6 @@ from kernel.models import ToolExecutionContext
 from sdk.workproducts import WorkProduct, WorkProductStore
 
 from lisa_packs.coding.config import (
-    ARGV_WORKSPACE_PYTHON,
-    CodingCheck,
     CodingPackConfig,
     CodingPreparationRecipe,
 )
@@ -38,8 +36,6 @@ __all__ = [
     "changed_paths",
     "checkpoint_prefix",
     "dependency_manifest_digest",
-    "expand_argv_placeholders",
-    "expand_check_argv",
     "load_owned_artifact",
     "patch_paths",
     "preparation_is_current",
@@ -52,7 +48,6 @@ __all__ = [
     "run_process",
     "tree_changes",
     "validate_artifact_id",
-    "workspace_python",
     "worktree_tree_sha",
 ]
 
@@ -310,34 +305,6 @@ async def run_contained(
     )
 
 
-def workspace_python(worktree: Path) -> Path:
-    """Return the platform-specific interpreter owned by the worktree venv."""
-
-    return (
-        worktree / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    )
-
-
-def expand_argv_placeholders(argv: tuple[str, ...], *, worktree: Path) -> tuple[str, ...]:
-    """Resolve the sole preparation-aware command placeholder.
-
-    Shared by session-configured checks and preparation recipes: the session
-    authors the command vector, the pack resolves only ``{workspace_python}``
-    to the worktree-owned interpreter (and never invents toolchain flags).
-    """
-
-    return tuple(
-        str(workspace_python(worktree)) if part == ARGV_WORKSPACE_PYTHON else part
-        for part in argv
-    )
-
-
-def expand_check_argv(check: CodingCheck, *, worktree: Path) -> tuple[str, ...]:
-    """Resolve the check's command-vector placeholders."""
-
-    return expand_argv_placeholders(check.argv, worktree=worktree)
-
-
 def preparation_recipe_digest(recipe: CodingPreparationRecipe) -> str:
     """Hash the exact finite recipe selected by session policy."""
 
@@ -397,7 +364,12 @@ def dependency_manifest_digest(
 def preparation_is_current(
     artifact: WorkProduct, *, worktree: Path, config: CodingPackConfig
 ) -> bool:
-    """Require current recipe, manifests, and owned interpreter evidence."""
+    """Require current recipe and manifest digests, plus probe evidence.
+
+    For module-probing recipes the recorded ``python_path`` is the probe's
+    certification result, not a live filesystem comparison: staleness rides
+    the recipe and manifests, and each new preparation re-runs the probe.
+    """
 
     if not config.preparation_recipes:
         return True
@@ -410,14 +382,7 @@ def preparation_is_current(
             preparation.recipe_digest == preparation_recipe_digest(recipe)
             and preparation.dependency_manifest_digest
             == dependency_manifest_digest(worktree, recipe=recipe)
-            and (
-                not recipe.project_modules
-                or (
-                    Path(preparation.python_path).absolute()
-                    == workspace_python(worktree).absolute()
-                    and workspace_python(worktree).is_file()
-                )
-            )
+            and (not recipe.project_modules or bool(preparation.python_path))
         )
     except (OSError, ValueError, CodingWorkflowError):
         return False
