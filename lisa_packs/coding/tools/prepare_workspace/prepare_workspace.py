@@ -144,9 +144,13 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             # uv-mediated interpreter address, so its own sys.executable
             # assertion certifies that uv run resolves to the owned venv
             # rather than a PATH or host interpreter. ``--no-cache`` keeps
-            # the probe independent of a writable uv cache, which sandbox
-            # floors do not grant; the address itself is pack-owned
-            # mechanics, like the probe script.
+            # the probe independent of a writable uv cache — existence and
+            # writability both: the pack's floor contribution
+            # (``lisa_packs.coding.sandbox``) grants ``~/.cache/uv`` when
+            # the configured toolchain names uv and the root exists, but
+            # the probe must also survive floors without that grant (hand,
+            # harness-authored, or a cold machine). The address itself is
+            # pack-owned mechanics, like the probe script.
             probed = await run_contained(
                 ctx,
                 (

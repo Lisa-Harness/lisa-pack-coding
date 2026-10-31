@@ -368,9 +368,14 @@ or `coding_commit` returns an error. Address the interpreter with the
 worktree-owned toolchain, e.g.
 `uv run --no-sync --no-cache …` — the bounded executor does no shell PATH
 lookups for Python and a bare `python` would run whatever the sandbox image
-provides (or fail; `uv` itself is resolved on PATH). `--no-cache` keeps
-sandboxed runs independent of a writable uv cache, which containment floors
-typically do not grant.
+provides (or fail; `uv` itself is resolved on PATH). `--no-sync` keeps
+checks pure consumers of the prepared venv (staleness is the pack's gate,
+not uv's). `--no-cache` keeps the run independent of the uv cache's
+existence and writability: the pack's floor contribution grants
+`~/.cache/uv` when the configured toolchain names `uv` and the root exists
+([sandbox.py](lisa_packs/coding/sandbox.py)), but checks must also survive
+floors that grant none — test harnesses, hand-authored floors, cold
+machines. For `uv sync` (preparation) keep the cache: installing is its job.
 
 ## Language support
 
