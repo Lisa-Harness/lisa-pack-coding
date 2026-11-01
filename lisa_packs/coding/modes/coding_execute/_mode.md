@@ -39,6 +39,8 @@ allowed_tool_ids:
   - coding_list_directory
   - coding_find_files
   - coding_read_file
+  - coding_git_diff
+  - coding_git_log
   - coding_search_code
   - coding_outline_source
   - coding_create_worktree

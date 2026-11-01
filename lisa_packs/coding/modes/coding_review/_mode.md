@@ -35,6 +35,8 @@ allowed_tool_ids:
   - coding_outline_source
   - coding_search_code
   - coding_read_file
+  - coding_git_diff
+  - coding_git_log
   - coding_list_directory
   - coding_find_files
   - coding_status
@@ -52,6 +54,15 @@ diagnostics on one), and your write operations to document the review
 (`markdown_forge_document`) or capture concepts (`okf_emit_concept`).
 
 You are read-only: you never create worktrees, edit files, or run checks.
+For branch reviews, use `coding_git_diff` with `comparison: "branch"` and
+explicit `base`/`head` revisions; use `"trees"` when the exact snapshots
+matter. For commit reviews, use `comparison: "commit"` and `revision`.
+Start with the changed-file summary, then request patches. If a patch is
+omitted by the byte limit, inspect the affected lines with `coding_read_file`
+at the returned `head_sha`. Use `coding_git_log` to understand commit intent,
+and read surrounding code at the same resolved revision rather than silently
+mixing in the current checkout.
+
 When the review is complete, hand off to `coding_execute` (via a yielded
 question to the operator, or `delegate`) to implement any accepted findings.
 

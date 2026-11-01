@@ -96,7 +96,6 @@ def validate_artifact_id(value: object) -> object:
     return value
 
 
-
 @dataclass(frozen=True, slots=True)
 class ProcessResult:
     """Bounded process result; output is never unbounded host memory."""
@@ -395,6 +394,7 @@ async def run_git(
     config: CodingPackConfig,
     stdin_text: str | None = None,
     env: Mapping[str, str] | None = None,
+    max_output_bytes: int | None = None,
 ) -> ProcessResult:
     """Run Git with a fixed executable and bounded output."""
 
@@ -402,7 +402,11 @@ async def run_git(
         ("git", *args),
         cwd=root,
         timeout_seconds=config.git_timeout_seconds,
-        max_output_bytes=config.max_command_output_bytes,
+        max_output_bytes=(
+            max_output_bytes
+            if max_output_bytes is not None
+            else config.max_command_output_bytes
+        ),
         stdin_text=stdin_text,
         env={**(os.environ if env is None else env), **_GIT_BACKGROUND_ENV},
     )
@@ -627,9 +631,7 @@ async def load_owned_artifact(
             "Artifact does not belong to this workspace, user, or session."
         )
     if require_worktree:
-        artifact_worktree(
-            artifact, config=config, allow_missing=allow_missing_worktree
-        )
+        artifact_worktree(artifact, config=config, allow_missing=allow_missing_worktree)
     if claim:
         artifact.claim_for_task(ctx)
     return artifact

@@ -19,7 +19,7 @@ the controlling module for each.
 
 ## What the pack provides
 
-Sixteen tools, three modes, plus two host commands.
+Eighteen tools, three modes, plus two host commands.
 
 **Modes** (added 2026-10-04, replacing the executor/reviewer personas that used
 to live in `lisa-pack-personas`):
@@ -39,7 +39,8 @@ inside one pack.
 ### Git-workflow tools (the artifact lifecycle)
 
 All take `artifact_id` (except `create_worktree`) and operate **only** on an
-owned worktree, never the source checkout.
+owned worktree, never the source checkout. The read-only Git inspection tools can
+target the source workspace or an owned worktree.
 
 | Tool | Effect | Approval | Role |
 | --- | --- | --- | --- |
@@ -88,6 +89,8 @@ reconcile the worktree and artifact before retrying in either case.
 | `coding_list_directory` | read | 50/turn | Bounded directory listing. |
 | `coding_find_files` | read | 50/turn | Enumerate non-generated source files. |
 | `coding_read_file` | read | 50/turn | Byte- and line-bounded excerpt, one `<line>\t<text>` row per line (binary rejected). |
+| `coding_git_diff` | read | 30/turn | Compare branches via merge-base, exact trees, or a commit against its first parent; paginated changed paths and optional complete per-file patches under a strict byte budget. |
+| `coding_git_log` | read | 30/turn | Paginated commit history at a revision or within a base/head range, optionally path-filtered. |
 | `coding_search_code` | read | 40/turn | Bounded ripgrep JSON search. |
 | `coding_outline_source` | read | 50/turn | Bounded structural outline of a source file. |
 | `coding_read_copilot_customizations` | read | 10/turn | Parse `.github/{instructions,agents,prompts,skills}` / `.claude` files into structured front-matter + body. `default_available: false`. |
@@ -189,8 +192,10 @@ explicit **argv** via `asyncio.create_subprocess_exec` (no shell expansion),
 drains stdout/stderr through `_drain_limited` (retains at most
 `max_command_output_bytes`, flags `output_truncated`), and kills on
 `timeout_seconds`. `run_git()` is the same with a fixed `git` executable and
-the pack's `git_timeout_seconds`. All git work happens in the **owned
-worktree**, never the source checkout.
+the pack's `git_timeout_seconds`. Lifecycle mutations happen only in the **owned
+worktree**; Git inspection is read-only and can target the configured source
+workspace or an owned worktree. Review operations never fetch or check out
+revisions.
 
 ### `run_check` requires bwrap
 
@@ -383,7 +388,12 @@ Support is per-tool, uniform across the source workspace and owned worktrees:
 
 - **Read / list / find / search — language-agnostic.**
   `coding_list_directory`, `coding_find_files`, `coding_read_file`,
-  `coding_search_code` treat the tree as text. Search runs a fixed
+  `coding_search_code`, `coding_git_diff`, and `coding_git_log` inspect the
+  tree without language-specific parsing. `coding_read_file` accepts an
+  optional `revision` to read a historical Git blob; historical reads are
+  never edit-ready. `coding_git_diff` separates merge-base branch comparisons
+  from exact tree comparisons and uses immutable SHA values in its result.
+  Search runs a fixed
   `rg --json --no-heading --no-config` invocation, so any file ripgrep matches
   is searchable regardless of language. `read_file` returns any UTF-8 text
   (binary files are rejected). No per-language logic.

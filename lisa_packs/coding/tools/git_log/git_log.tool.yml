@@ -1,0 +1,6 @@
+tool_id: coding_git_log
+pack_id: lisa-pack-coding
+description: "Read a bounded, paginated commit history at a revision or between base and head, optionally filtered by paths. Returns immutable commit and parent SHAs, subjects, authors, and authored timestamps."
+exportable: true
+effect: read
+max_calls_per_turn: 30
