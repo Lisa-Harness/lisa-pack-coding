@@ -172,3 +172,62 @@ async def test_git_read_tools_report_invalid_revisions(tmp_path: Path) -> None:
 
     assert result.error
     assert result.output_json == {}
+
+
+@pytest.mark.asyncio
+async def test_working_tree_comparisons_separate_staged_unstaged_and_untracked(
+    tmp_path: Path,
+) -> None:
+    """Stage-aware diffs keep untracked paths separate from tracked patches."""
+
+    root = tmp_path / "repo"
+    await _repository(root)
+    (root / "app.txt").write_text("staged\n", encoding="utf-8")
+    (root / "staged-only.txt").write_text("staged file\n", encoding="utf-8")
+    await _git(root, "add", "app.txt", "staged-only.txt")
+    (root / "app.txt").write_text("working tree\n", encoding="utf-8")
+    (root / "untracked-a.txt").write_text("not staged\n", encoding="utf-8")
+    (root / "untracked-b.txt").write_text("also not staged\n", encoding="utf-8")
+    (root / ".venv").mkdir()
+    (root / ".venv" / "ignored-by-coding-tools.txt").write_text(
+        "generated\n", encoding="utf-8"
+    )
+
+    staged = await git_diff(_context(root, {"comparison": "staged"}))
+    assert staged.error == ""
+    assert staged.output_json["from_endpoint"] == "HEAD"
+    assert staged.output_json["to_endpoint"] == "index"
+    assert {change["path"] for change in staged.output_json["changes"]} == {
+        "app.txt",
+        "staged-only.txt",
+    }
+
+    unstaged = await git_diff(_context(root, {"comparison": "unstaged"}))
+    assert unstaged.error == ""
+    assert unstaged.output_json["from_endpoint"] == "index"
+    assert unstaged.output_json["to_endpoint"] == "worktree"
+    assert [change["path"] for change in unstaged.output_json["changes"]] == ["app.txt"]
+
+    combined = await git_diff(
+        _context(
+            root,
+            {"comparison": "working_tree", "include_patches": True, "limit": 1},
+            patch_bytes=4096,
+        )
+    )
+    assert combined.error == ""
+    assert combined.output_json["from_endpoint"] == "HEAD"
+    assert combined.output_json["to_endpoint"] == "worktree"
+    assert {change["path"] for change in combined.output_json["changes"]} == {"app.txt"}
+    assert combined.output_json["total_changes"] == 2
+    assert all(patch["complete"] for patch in combined.output_json["patches"])
+    assert combined.output_json["untracked_files"] == ["untracked-a.txt"]
+    assert combined.output_json["untracked_files_observed"] == 2
+    assert combined.output_json["untracked_next_offset"] == 1
+    assert combined.output_json["untracked_list_truncated"] is False
+
+    next_page = await git_diff(
+        _context(root, {"comparison": "working_tree", "offset": 1, "limit": 1})
+    )
+    assert next_page.error == ""
+    assert next_page.output_json["untracked_files"] == ["untracked-b.txt"]

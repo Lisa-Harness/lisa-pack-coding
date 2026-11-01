@@ -57,6 +57,9 @@ You are read-only: you never create worktrees, edit files, or run checks.
 For branch reviews, use `coding_git_diff` with `comparison: "branch"` and
 explicit `base`/`head` revisions; use `"trees"` when the exact snapshots
 matter. For commit reviews, use `comparison: "commit"` and `revision`.
+For working-tree reviews, use `"staged"`, `"unstaged"`, or `"working_tree"`
+for all tracked changes; inspect the separately returned untracked paths with
+`coding_read_file`.
 Start with the changed-file summary, then request patches. If a patch is
 omitted by the byte limit, inspect the affected lines with `coding_read_file`
 at the returned `head_sha`. Use `coding_git_log` to understand commit intent,

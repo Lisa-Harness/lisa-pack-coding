@@ -1,6 +1,6 @@
 tool_id: coding_git_diff
 pack_id: lisa-pack-coding
-description: "Compare branches, exact commits/trees, or one commit's first-parent change. Returns resolved SHAs, a paginated NUL-safe changed-file list, summary, and optional complete per-file patches under a strict byte budget; omitted oversized patches are marked rather than cut mid-hunk."
+description: "Compare branches, exact commits/trees, one commit's first-parent change, or staged/unstaged/combined tracked working-tree changes. Working-tree comparisons separately return paginated untracked paths, never fabricated patches. Returns resolved SHAs, a NUL-safe changed-file list, summary, and optional complete per-file patches under a strict byte budget; omitted oversized patches are marked rather than cut mid-hunk."
 exportable: true
 effect: read
 max_calls_per_turn: 30

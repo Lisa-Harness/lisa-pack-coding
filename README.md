@@ -89,7 +89,7 @@ reconcile the worktree and artifact before retrying in either case.
 | `coding_list_directory` | read | 50/turn | Bounded directory listing. |
 | `coding_find_files` | read | 50/turn | Enumerate non-generated source files. |
 | `coding_read_file` | read | 50/turn | Byte- and line-bounded excerpt, one `<line>\t<text>` row per line (binary rejected). |
-| `coding_git_diff` | read | 30/turn | Compare branches via merge-base, exact trees, or a commit against its first parent; paginated changed paths and optional complete per-file patches under a strict byte budget. |
+| `coding_git_diff` | read | 30/turn | Compare branches via merge-base, exact trees, a commit against its first parent, or staged/unstaged/combined tracked worktree changes. Working-tree comparisons separately list paginated untracked paths; patches are complete per file and byte-bounded. |
 | `coding_git_log` | read | 30/turn | Paginated commit history at a revision or within a base/head range, optionally path-filtered. |
 | `coding_search_code` | read | 40/turn | Bounded ripgrep JSON search. |
 | `coding_outline_source` | read | 50/turn | Bounded structural outline of a source file. |

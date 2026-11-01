@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import CodingPackConfig, get_coding_config
 from lisa_packs.coding.local_files import (
     CodingPathError,
+    excluded_relative_path,
     relative_path,
     resolve_relative_path_at_root,
 )
@@ -29,7 +31,16 @@ class Parameters(BaseModel):
 
     artifact_id: str | None = Field(default=None, min_length=1, max_length=100)
     scope: Literal["auto", "source", "worktree"] = "auto"
-    comparison: Literal["branch", "trees", "commit"] = "branch"
+    comparison: Literal[
+        "branch", "trees", "commit", "staged", "unstaged", "working_tree"
+    ] = Field(
+        default="branch",
+        description=(
+            "Compare a merge-base branch range, exact trees, a commit's first parent, "
+            "the index against HEAD, the worktree against the index, or all tracked "
+            "worktree changes against HEAD."
+        ),
+    )
     base: str | None = Field(default=None, min_length=1, max_length=256)
     head: str | None = Field(default=None, min_length=1, max_length=256)
     revision: str | None = Field(default=None, min_length=1, max_length=256)
@@ -45,7 +56,16 @@ class Parameters(BaseModel):
 
     @model_validator(mode="after")
     def _validate_revision_inputs(self) -> Parameters:
-        if self.comparison == "commit":
+        if self.comparison in ("staged", "unstaged", "working_tree"):
+            if (
+                self.revision is not None
+                or self.base is not None
+                or self.head is not None
+            ):
+                raise ValueError(
+                    "working-tree comparisons do not accept revision, base, or head."
+                )
+        elif self.comparison == "commit":
             if self.revision is None or self.base is not None or self.head is not None:
                 raise ValueError("commit comparison requires revision only.")
         elif self.revision is not None or self.base is None or self.head is None:
@@ -145,21 +165,39 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         read_root = await readable_root(
             ctx, artifact_id=params.artifact_id, scope=params.scope, config=config
         )
-        base_sha, diff_base_sha, head_sha, merge_base = await _comparison(
-            read_root, params, config
-        )
         paths = await _validated_paths(read_root, params.paths)
-        revisions = [diff_base_sha, head_sha]
         pathspecs = [f":(literal){path}" for path in paths]
-        diff_args = [
+        path_filter_args = ["--", *pathspecs] if pathspecs else []
+        diff_options = [
             "--no-ext-diff",
             "--no-textconv",
+            "--no-color",
             "--find-renames",
             "--relative",
-            *revisions,
         ]
-        if pathspecs:
-            diff_args.extend(("--", *pathspecs))
+        working_tree_comparison = params.comparison in (
+            "staged",
+            "unstaged",
+            "working_tree",
+        )
+        if working_tree_comparison:
+            if params.comparison == "staged":
+                comparison_args = ["--cached", *diff_options]
+                from_endpoint, to_endpoint = "HEAD", "index"
+            elif params.comparison == "unstaged":
+                comparison_args = diff_options
+                from_endpoint, to_endpoint = "index", "worktree"
+            else:
+                comparison_args = ["HEAD", *diff_options]
+                from_endpoint, to_endpoint = "HEAD", "worktree"
+            base_sha = diff_base_sha = head_sha = merge_base = None
+        else:
+            base_sha, diff_base_sha, head_sha, merge_base = await _comparison(
+                read_root, params, config
+            )
+            comparison_args = [*diff_options, diff_base_sha, head_sha]
+            from_endpoint, to_endpoint = diff_base_sha, head_sha
+        diff_args = [*comparison_args, *path_filter_args]
         names = await run_git(
             read_root.path,
             ("diff", "--name-status", "-z", *diff_args),
@@ -176,6 +214,35 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             )
         changes = _parse_name_status(names.stdout)
         selected = changes[params.offset : params.offset + params.limit]
+        untracked_names: list[str] = []
+        untracked_output_truncated = False
+        if working_tree_comparison:
+            untracked = await run_git(
+                read_root.path,
+                (
+                    "ls-files",
+                    "--others",
+                    "--exclude-standard",
+                    "-z",
+                    *path_filter_args,
+                ),
+                config=config,
+            )
+            if untracked.return_code != 0:
+                raise CodingWorkflowError(
+                    untracked.stderr.strip() or "Cannot list untracked files."
+                )
+            untracked_output_truncated = untracked.output_truncated
+            untracked_names = sorted(
+                {
+                    path
+                    for path in untracked.stdout.split("\0")
+                    if path and not excluded_relative_path(Path(path))
+                }
+            )
+        selected_untracked = untracked_names[
+            params.offset : params.offset + params.limit
+        ]
         patches: list[dict[str, object]] = []
         patch_budget = config.max_patch_bytes
         if params.include_patches:
@@ -197,10 +264,11 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
                         "diff",
                         "--no-ext-diff",
                         "--no-textconv",
+                        "--no-color",
                         "--find-renames",
                         "--relative",
                         "--unified=3",
-                        *revisions,
+                        *comparison_args,
                         "--",
                         f":(literal){path}",
                     ),
@@ -232,13 +300,22 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
 
     return ToolResult(
         tool_id=TOOL_ID,
-        output_text=f"Found {len(changes)} changed files.",
+        output_text=(
+            f"Found {len(changes)} changed files"
+            + (
+                f" and {len(untracked_names)} untracked files."
+                if working_tree_comparison
+                else "."
+            )
+        ),
         output_json={
             "comparison": params.comparison,
             "base_sha": base_sha,
             "diff_base_sha": diff_base_sha,
             "head_sha": head_sha,
             "merge_base_sha": merge_base,
+            "from_endpoint": from_endpoint,
+            "to_endpoint": to_endpoint,
             "scope": read_root.scope,
             "artifact_id": read_root.artifact_id,
             "changes": selected,
@@ -250,6 +327,12 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             "file_list_truncated": names.output_truncated,
             "summary": summary.stdout.strip() or "(no changes)",
             "patches": patches,
+            "untracked_files": selected_untracked,
+            "untracked_files_observed": len(untracked_names),
+            "untracked_next_offset": params.offset + len(selected_untracked)
+            if params.offset + len(selected_untracked) < len(untracked_names)
+            else None,
+            "untracked_list_truncated": untracked_output_truncated,
             "patch_byte_limit": config.max_patch_bytes
             if params.include_patches
             else None,
