@@ -24,6 +24,8 @@ EXPECTED_TOOLS = {
     "coding_edit_files",
     "coding_export_patches",
     "coding_find_files",
+    "coding_git_diff",
+    "coding_git_log",
     "coding_history",
     "coding_import_commits",
     "coding_list_directory",
@@ -69,6 +71,8 @@ def test_coding_pack_effect_contract() -> None:
     report = validate_pack(PACK_PATH)
     read_tools = {
         "coding_find_files",
+        "coding_git_diff",
+        "coding_git_log",
         "coding_list_directory",
         "coding_list_worktrees",
         "coding_outline_source",
