@@ -29,14 +29,21 @@ class CodingCheck(BaseModel):
     kind: Literal["verify", "fix"] = "verify"
 
 
+#: Package managers whose install stage materializes a worktree ``node_modules``.
+#: Matched as whole argv tokens (``env PNPM_HOME=… pnpm install`` counts;
+#: ``pnpm`` never matches an ``npm`` test, so the two stay distinct).
+_NODE_PACKAGE_MANAGERS = frozenset({"npm", "pnpm", "yarn", "bun"})
+
+
 class CodingPreparationRecipe(BaseModel):
     """One finite, session-authorized workspace preparation recipe.
 
     The prepare command is a session-authored argument vector, exactly like
     the pack's checks: the pack owns the mechanics (sandbox containment,
-    interpreter probe, baseline evidence), the session owns the toolchain.
+    provenance probes, baseline evidence), the session owns the toolchain.
     No placeholders exist; a Python-shaped recipe addresses the worktree-owned
-    interpreter with ``uv run --no-sync``.
+    interpreter with ``uv run --no-sync``, a Node-shaped one runs ``pnpm``
+    install and probes ``node_modules``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -47,14 +54,47 @@ class CodingPreparationRecipe(BaseModel):
     #: evidence. An empty tuple means the recipe is self-describing and
     #: staleness rides the recipe hash alone. Declared so the gate matches
     #: the recipe's toolchain: a uv recipe sees uv.lock, an npm recipe sees
-    #: package-lock.json.
+    #: package-lock.json, a pnpm recipe sees pnpm-lock.yaml.
     manifest_paths: tuple[str, ...] = Field(default=(), max_length=8)
-    #: Modules (import names) that must resolve from the worktree-owned
+    #: Python modules (import names) that must resolve from the worktree-owned
     #: interpreter after preparation. Empty skips the interpreter probe for
     #: recipes that do not produce one.
     project_modules: tuple[str, ...] = Field(default=(), max_length=20)
+    #: Node packages (resolvable names) that must resolve from the worktree's
+    #: own ``node_modules`` after preparation. Empty skips the Node probe.
+    node_packages: tuple[str, ...] = Field(default=(), max_length=20)
+    #: Extra worktree-relative runtime directories preparation creates that
+    #: must already be Git-ignored (e.g. ``.turbo/``). The toolchain's own
+    #: directories are derived — see :meth:`required_ignored_paths`.
+    ignored_paths: tuple[str, ...] = Field(default=(), max_length=8)
     baseline_check_ids: tuple[str, ...] = ()
     timeout_seconds: int = Field(default=600, ge=1, le=1800)
+
+    def required_ignored_paths(self) -> tuple[str, ...]:
+        """Return runtime directories preparation creates that must be ignored.
+
+        Preparation writes runtime state into the worktree (a ``.venv``, a
+        ``node_modules``) before the baseline tree hash is taken. Unignored,
+        that state enters the candidate tree: the baseline hash covers it and
+        the commit gate stages it. The directories are therefore a
+        precondition, and which ones exist is a property of the *toolchain*
+        the recipe names, not of the pack — a pnpm project has no ``.venv``
+        and a uv project has no ``node_modules``. Deriving here keeps the
+        guard matching the recipe while staying session-owned: anything
+        unusual is declared explicitly in ``ignored_paths``.
+        """
+
+        argv = frozenset(self.prepare_argv)
+        derived: list[str] = []
+        if "uv" in argv or self.project_modules:
+            derived.append(".venv")
+        if argv & _NODE_PACKAGE_MANAGERS or self.node_packages:
+            derived.append("node_modules")
+        declared = [raw.strip().strip("/") for raw in self.ignored_paths]
+        declared = [raw for raw in declared if raw]
+        # Normalize to a trailing slash so a declared ``node_modules`` and the
+        # derived ``node_modules/`` are one entry, not two.
+        return tuple(f"{raw}/" for raw in dict.fromkeys([*derived, *declared]))
 
 
 class CodingPackConfig(BaseModel):
@@ -119,11 +159,11 @@ class CodingPackConfig(BaseModel):
                     f"recipe '{recipe.id}' references unknown baseline checks: "
                     + ", ".join(unknown_baseline)
                 )
-            for raw in recipe.manifest_paths:
+            for raw in (*recipe.manifest_paths, *recipe.ignored_paths):
                 candidate = Path(raw)
                 if candidate.is_absolute() or ".." in candidate.parts:
                     raise ValueError(
-                        f"recipe '{recipe.id}' manifest path must be relative "
+                        f"recipe '{recipe.id}' path must be relative "
                         f"without traversal: {raw!r}"
                     )
         if any(branch in self.protected_branches for branch in ("", self.branch_prefix)):

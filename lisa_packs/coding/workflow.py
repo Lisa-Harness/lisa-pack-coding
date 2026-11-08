@@ -54,6 +54,11 @@ __all__ = [
 _GIT_STATUS_PATH_OFFSET = 3
 # Upper bound on reaping and draining once a process group has been killed.
 _KILL_GRACE_SECONDS = 5.0
+# Upper bound bwrap_run accepts for its own timeout_seconds parameter. The
+# pack's config is stricter (checks and recipes cap at 1800s); forwarding the
+# configured value means a slow install is bounded by the session's own
+# policy rather than by an undocumented second cap.
+_SANDBOX_TIMEOUT_CEILING_SECONDS = 3600
 # Git must never wait on a human, and read-only commands such as ``status``
 # must not take the index lock away from the user's own Git or editor.
 _GIT_BACKGROUND_ENV = {"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
@@ -231,7 +236,15 @@ async def run_contained(
     worktree: Path,
     timeout_seconds: int,
 ) -> ProcessResult:
-    """Run under the bwrap owner's verified direct-write worktree floor."""
+    """Run under the bwrap owner's verified direct-write worktree floor.
+
+    The configured ``timeout_seconds`` is forwarded as-is up to
+    :data:`_SANDBOX_TIMEOUT_CEILING_SECONDS`, the ceiling ``bwrap_run``
+    itself validates against. The pack's config already bounds every
+    recipe and check to 1800s, so a second, smaller cap here only turned
+    a slow-but-legitimate install into a spurious timeout — a cold pnpm
+    install of a large workspace is exactly that case.
+    """
 
     dispatch = ctx.delegated_tool_dispatch
     floor_for = ctx.execution_floor_for
@@ -277,7 +290,7 @@ async def run_contained(
             "argv": list(argv),
             "cwd": str(worktree),
             "overrides": overrides,
-            "timeout_seconds": min(timeout_seconds, 600),
+            "timeout_seconds": min(timeout_seconds, _SANDBOX_TIMEOUT_CEILING_SECONDS),
         },
     )
     payload = dict(tool_result.output_json or {})
@@ -365,9 +378,10 @@ def preparation_is_current(
 ) -> bool:
     """Require current recipe and manifest digests, plus probe evidence.
 
-    For module-probing recipes the recorded ``python_path`` is the probe's
-    certification result, not a live filesystem comparison: staleness rides
-    the recipe and manifests, and each new preparation re-runs the probe.
+    For probing recipes the recorded ``python_path``/``node_modules`` values
+    are the probe's certification results, not a live filesystem comparison:
+    staleness rides the recipe and manifests, and each new preparation re-runs
+    the probe.
     """
 
     if not config.preparation_recipes:
@@ -377,11 +391,16 @@ def preparation_is_current(
         return False
     try:
         recipe = config.preparation_recipe(preparation.recipe_id)
+        recorded = json.loads(preparation.probe_stdout) if preparation.probe_stdout else {}
         return (
             preparation.recipe_digest == preparation_recipe_digest(recipe)
             and preparation.dependency_manifest_digest
             == dependency_manifest_digest(worktree, recipe=recipe)
             and (not recipe.project_modules or bool(preparation.python_path))
+            and (
+                not recipe.node_packages
+                or bool(str(recorded.get("node_modules") or ""))
+            )
         )
     except (OSError, ValueError, CodingWorkflowError):
         return False

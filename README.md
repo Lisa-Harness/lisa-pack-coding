@@ -49,7 +49,7 @@ target the source workspace or an owned worktree.
 | `coding_edit_files` | write | ✓ | Preferred editor: apply exact, hash-guarded replacements, creates, or deletes as one revision. Replacements match the original snapshot and must not overlap. The tool generates and prevalidates the Git patch, preserving supplied content and EOF newlines. |
 | `coding_apply_patch` | write | ✓ | Fallback for existing unified diffs: prevalidate (`git apply --check`) and apply a bounded patch. Bumps `revision`, records `changed_paths`, **clears `checks`** (stale results are invalidated). |
 | `coding_import_commits` | write | ✓ | Replay one already-merged upstream commit onto the owned worktree: the worktree must be created with `import_commit` (base = that commit's parent), the commit's diff applies as one patch revision, and `checks` are cleared. Rejects re-import before a commit/export, base drift, and empty commits. |
-| `coding_prepare_workspace` | write | ✓ | Run the session-configured preparation command (an argument vector in `preparation_recipes`, exactly like a check's `argv`) in the owned sandbox and record preparation evidence. Checks refuse to run until preparation is current. |
+| `coding_prepare_workspace` | write | ✓ | Run the session-configured preparation command (an argument vector in `preparation_recipes`, exactly like a check's `argv`) in the owned sandbox, certify the prepared Python interpreter and/or Node packages, and record preparation evidence. Checks refuse to run until preparation is current. |
 | `coding_run_check` | write | ✓ | Run one named check through the bwrap owner's direct-write sandbox floor. Result records the current revision and candidate-tree hash; no host fallback. A `verify` check that rewrites files fails and its edits are reverted; a `fix` check's edits become a new revision (like a patch) and stale the other checks. |
 | `coding_commit` | write | ✓ | Stage commit candidates and commit only after required checks passed for this revision and tree, on the owned unprotected branch. The message may be any length and span multiple lines. Committing clears pending `imported_commits` state (the imported content is carried by the commit). |
 | `coding_history` | write | ✓ | Slice and dice the owned branch's committed history: `tag`/`tag_delete` (owned commits only), `restore` (rewind to any existing tag's commit, including `<branch_prefix>ckpt/` checkpoints), `reword`, `squash` (fold owned commits into one; `target` keeps everything at or below it as a parent), or `rebase` (`--onto` a new base given as any Git revision — SHA or branch name — auto-abort on conflict; use it as soon as the source tip moves past the artifact base). Every rewrite first tags a checkpoint; a rewrite that leaves the tree byte-identical keeps recorded checks, any content change clears them. Refuses rewrites of already-pushed commits; protected branches and the source checkout are untouchable. |
@@ -212,8 +212,10 @@ The worktree parent is a **runtime-derived** path
 `<data_dir>/git-worktrees/<workspace>`) — the harness cannot know it when
 hand-authoring the session floor. The **language-platform cache roots**
 are the same class of need: the toolchain — not the harness — sets the
-location (uv: `~/.cache/uv`; Go: `~/.cache/go-build` + `~/go/pkg/mod`; the
-Go-era floor carried exactly those by hand). [sandbox.py](lisa_packs/coding/sandbox.py)
+location (uv: `~/.cache/uv`; Go: `~/.cache/go-build` + `~/go/pkg/mod`;
+npm: `~/.npm`; pnpm: `~/.local/share/pnpm/store` + `~/.cache/pnpm`; yarn:
+`~/.yarn/berry/cache` + `~/.cache/yarn`; bun: `~/.bun/install/cache`;
+the Go-era floor carried the Go pair by hand). [sandbox.py](lisa_packs/coding/sandbox.py)
 declares both through the `lisa.extensions.sandbox_floors` entry point:
 
 ```python
@@ -243,11 +245,20 @@ can never drift apart — the failure mode behind the 2026-10-14
 writes" after the data-dir switch). The contribution is derived from the
 same `resolve_worktree_parent` the worktree tools use, so resolution changes
 flow into the floor automatically. Cache roots are detected from the
-*configured* check/recipe argv (a `uv` argv contributes `~/.cache/uv`; a
-`go` argv contributes the Go caches) and only when they exist on the host —
-floor `rw` binds have no existence filter, so a missing cache directory
-contributes nothing rather than aborting every run. The sandbox child env
-passes `HOME` and no `*_CACHE_DIR` overrides, and the bwrap owner normalizes
+*configured* check/recipe argv by whole-token match — a `uv` argv contributes
+`~/.cache/uv`, a `pnpm` argv contributes `~/.local/share/pnpm/store` +
+`~/.cache/pnpm` (so `pnpm` never matches an `npm` test, and
+`env FOO=1 pnpm install` still counts) — and only when they exist on the
+host: floor `rw` binds have no existence filter, so a missing cache
+directory contributes nothing rather than aborting every run. The sandbox
+child env passes `HOME` and no `*_CACHE_DIR` overrides, which is why these
+are the right paths to bind: each tool derives that location from `HOME`
+alone, so it resolves identically inside and outside the sandbox. A pnpm
+session needs the store specifically — pnpm materializes every package from
+its content store by hard link or copy, so an unwritable store fails the
+install outright (`ERR_PNPM_STORE_DIR_OPEN_OPERATION_LOCK`, os error 30)
+while a writable one that is *not* the host default silently relocates the
+store into the worktree. The bwrap owner normalizes
 `TMPDIR` to the namespace's writable `/tmp` (`--tmpfs /tmp`), so temp files
 never resolve through a masked or read-only host path: a preparation recipe
 needs no `env TMPDIR=` prefix. Network is deliberately *not* contributed:
@@ -271,7 +282,8 @@ where `kind` is `verify` (default) or `fix`),
 `<source-parent>/.lisa-patches`; must be absolute and outside the source),
 `worktree_dir` (empty → `<data-dir>/git-worktrees/<workspace-name>` from the
 host-injected data dir; must be absolute; the resolved worktree directory must
-stay outside the source), and the byte/line/result bounds
+stay outside the source), `preparation_recipes` (tuple of the recipe fields
+documented above), and the byte/line/result bounds
 (`max_file_bytes` 512 000, `max_read_lines` 400, `max_patch_bytes` 200 000,
 `max_command_output_bytes` 100 000, `git_timeout_seconds` 60, …).
 
@@ -382,9 +394,71 @@ existence and writability: the pack's floor contribution grants
 floors that grant none — test harnesses, hand-authored floors, cold
 machines. For `uv sync` (preparation) keep the cache: installing is its job.
 
+### With preparation (Python or Node)
+
+`checks` alone assume the workspace is already installable. A
+`preparation_recipes` entry makes `coding_prepare_workspace` run one finite,
+sandboxed command and record evidence; `coding_run_check` and `coding_commit`
+refuse to proceed until that evidence matches the current recipe and
+manifests. The pack owns the mechanics (containment, provenance probes,
+baseline checks); the session owns the toolchain.
+
+| Field | Meaning |
+| --- | --- |
+| `prepare_argv` | The install command, a session-authored vector like a check's. |
+| `manifest_paths` | Worktree-relative lockfiles whose digest makes preparation stale when edited (`package.json`, `pnpm-lock.yaml`, `uv.lock`, …). |
+| `project_modules` | Python import names that must resolve from the worktree `.venv`. Enables the interpreter probe. |
+| `node_packages` | Node package names that must resolve from the worktree `node_modules`. Enables the Node probe. |
+| `ignored_paths` | Extra runtime dirs preparation creates that must be Git-ignored. `.venv/` and `node_modules/` are derived from the recipe's toolchain and need not be listed. |
+| `baseline_check_ids` | Checks to run immediately after preparing, recorded as baseline evidence. |
+
+`manifest_paths` and `ignored_paths` must be worktree-relative with no `..`.
+Before running the command, preparation requires every derived or declared
+runtime directory to be Git-ignored — otherwise the install would land in the
+candidate tree hash and get committed. A Python recipe is therefore asked
+for `.venv/` and a Node recipe for `node_modules/`, never both.
+
+```yaml
+      lisa-pack-coding:
+        workspace_root: /home/you/Code/my-ts-app
+        checks:
+          # `fix` kind: formatter rewrites become a new artifact revision.
+          - id: format
+            argv: ["pnpm", "exec", "prettier", "--write", "."]
+            kind: fix
+          - id: unit
+            argv: ["pnpm", "run", "test"]
+            timeout_seconds: 300
+          - id: type
+            argv: ["pnpm", "exec", "tsc", "--noEmit"]
+            timeout_seconds: 300
+        required_check_ids: [unit, type]
+        preparation_recipes:
+          - id: node-pnpm
+            prepare_argv: ["pnpm", "install", "--frozen-lockfile"]
+            manifest_paths: ["package.json", "pnpm-lock.yaml"]
+            node_packages: ["react"]      # certified to resolve from the worktree
+            baseline_check_ids: [unit]
+            timeout_seconds: 900
+```
+
+Two Node specifics worth knowing:
+
+- `pnpm exec` resolves binaries from the worktree's own `node_modules/.bin`
+  (the sandbox `cwd` is the worktree), so checks need no interpreter-path
+  dance: unlike Python, there is no `uv run` equivalent to remember.
+- The pnpm content store must be writable in the sandbox. The floor
+  contribution binds `~/.local/share/pnpm/store` and `~/.cache/pnpm` whenever
+  a pnpm argv is configured, so a networked session installs through the same
+  store as the host.
+
 ## Language support
 
-Support is per-tool, uniform across the source workspace and owned worktrees:
+Two language platforms are first-class — **Python** (uv) and
+**TypeScript/JavaScript** (pnpm, npm, yarn, bun). Both go through the same
+session-owned `checks` + `preparation_recipes` contract, so nothing in the
+toolchain path is Python-shaped any more. Support is per-tool, uniform across
+the source workspace and owned worktrees:
 
 - **Read / list / find / search — language-agnostic.**
   `coding_list_directory`, `coding_find_files`, `coding_read_file`,
@@ -523,6 +597,33 @@ creating runtime paths. The source checkout is preserved and the
 successful run writes a JSON trajectory under pytest's temporary directory.
 No model calls or downloads.
 
+### Repeatable pnpm / TypeScript Preparation Test
+
+Same framework and bwrap checkouts, plus `pnpm` (and Node ≥ 22.6 for
+`node --test` with built-in TypeScript type stripping) on `PATH`:
+
+```bash
+../../lisa/.venv/bin/python -m pytest \
+  lisa_packs/coding/tests/evals/test_worktree_trajectory.py -k pnpm \
+  -q -rs -p no:cacheprovider
+```
+
+This offline fixture installs a vendored `file:` dependency with
+`pnpm install --frozen-lockfile --offline`, so it needs no network and no warm
+store. It certifies that the declared package resolves from the worktree's own
+`node_modules` — including pnpm's symlinked `node_modules/.pnpm` virtual store,
+whose real path the probe reports — records baseline `pnpm run test` evidence,
+verifies `node_modules` is derived as a required ignore rule (and that an
+unignored one fails before the install runs), makes the preparation stale by
+editing `pnpm-lock.yaml`, re-prepares, and commits a TypeScript edit while the
+installed tree stays out of the commit. The pnpm store and cache are pinned to
+writable directories in the fixture, mirroring what the pack's floor
+contribution derives for a pnpm argv; without those binds the install fails
+with `ERR_PNPM_STORE_DIR_OPEN_OPERATION_LOCK` (os error 30).
+
+The TypeScript e2e scenario (`coding/roadmap-chunk-implement-node`) uses the
+same shape against [fixtures/nodesum](lisa_packs/coding/tests/e2e/fixtures/nodesum)
+and is judged by `acceptance/nodesum_apply_discount.sh`.
 ## How this pack fits the group
 
 The four related packs form one pipeline with clean seams — and **no

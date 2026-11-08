@@ -109,6 +109,74 @@ async def test_missing_cache_root_is_not_contributed(
 
 
 @pytest.mark.asyncio
+async def test_pnpm_cache_roots_contributed_for_pnpm_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # pnpm resolves its content store and metadata cache from HOME alone
+    # (both are absent from the bwrap child-env allowlist's override list),
+    # so a pnpm session needs those roots bound or an install either fails
+    # on an unwritable store or relocates it into the worktree.
+    (tmp_path / "t").mkdir(parents=True, exist_ok=True)
+    repo = await git_repo(tmp_path / "t", with_remote=False)
+    (tmp_path / ".local" / "share" / "pnpm" / "store").mkdir(parents=True)
+    (tmp_path / ".cache" / "pnpm").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    contribution = floor_contribution(
+        {
+            "workspace_root": str(repo.root),
+            "checks": [{"id": "type", "argv": ["pnpm", "exec", "tsc", "--noEmit"]}],
+            "preparation_recipes": [
+                {"id": "node-pnpm", "prepare_argv": ["pnpm", "install", "--frozen-lockfile"]}
+            ],
+        },
+        {"data_dir": str(tmp_path), "workspace_root": str(repo.root)},
+    )
+    assert contribution is not None
+    assert contribution["paths"][str(tmp_path / ".local" / "share" / "pnpm" / "store")] == "rw"
+    assert contribution["paths"][str(tmp_path / ".cache" / "pnpm")] == "rw"
+
+
+@pytest.mark.asyncio
+async def test_pnpm_token_does_not_match_npm_and_env_prefix_still_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Token matching is exact: an ``npm`` session must not pick up pnpm
+    # stores, while ``env FOO=bar pnpm install`` must (the word is still a
+    # whole argv token, which the old space-joined substring test missed).
+    (tmp_path / "t").mkdir(parents=True, exist_ok=True)
+    repo = await git_repo(tmp_path / "t", with_remote=False)
+    (tmp_path / ".npm").mkdir(parents=True)
+    (tmp_path / ".local" / "share" / "pnpm" / "store").mkdir(parents=True)
+    (tmp_path / ".cache" / "pnpm").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    npm_only = floor_contribution(
+        {
+            "workspace_root": str(repo.root),
+            "checks": [{"id": "test", "argv": ["npm", "test"]}],
+        },
+        {"data_dir": str(tmp_path), "workspace_root": str(repo.root)},
+    )
+    assert npm_only is not None
+    assert str(tmp_path / ".npm") in npm_only["paths"]
+    assert str(tmp_path / ".cache" / "pnpm") not in npm_only["paths"]
+
+    env_prefixed = floor_contribution(
+        {
+            "workspace_root": str(repo.root),
+            "checks": [
+                {
+                    "id": "test",
+                    "argv": ["env", "CI=1", "pnpm", "run", "test"],
+                }
+            ],
+        },
+        {"data_dir": str(tmp_path), "workspace_root": str(repo.root)},
+    )
+    assert env_prefixed is not None
+    assert str(tmp_path / ".cache" / "pnpm") in env_prefixed["paths"]
+
+
+@pytest.mark.asyncio
 async def test_contribution_omits_workspace_when_inside_worktree_parent(
     tmp_path: Path,
 ) -> None:

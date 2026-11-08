@@ -1,6 +1,6 @@
 tool_id: coding_prepare_workspace
 pack_id: lisa-pack-coding
-description: "Prepare an owned worktree with one finite session-configured preparation command, then verify the local interpreter and project import origins."
+description: "Prepare an owned worktree with one finite session-configured preparation command, then verify the prepared toolchain's provenance: the worktree-owned Python interpreter and import origins (project_modules) and/or the packages resolving from the worktree's own node_modules (node_packages)."
 timeout_seconds: 1800
 exportable: true
 effect: write

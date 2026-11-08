@@ -11,7 +11,8 @@ never drift apart.
 
 The same holds for the language-platform caches the configured toolchain
 resolves into (uv's ``~/.cache/uv`` for a Python session; the Go-era floor
-carried ``~/.cache/go-build`` + ``~/go/pkg/mod`` instead). The platform —
+carried ``~/.cache/go-build`` + ``~/go/pkg/mod`` instead; a pnpm session
+resolves its store under ``~/.local/share/pnpm``). The platform —
 not the harness — sets the location, so the contribution derives cache
 roots from the *configured* checks and preparation recipes: whatever
 toolchain the session declares, its cache paths land in the floor
@@ -46,26 +47,55 @@ def _toolchain_cache_roots(config: CodingPackConfig) -> list[Path]:
     - ``uv``: ``~/.cache/uv`` (wheel resolution for ``uv sync`` / ``uv run``).
     - ``go``: ``~/.cache/go-build`` (build cache) and ``~/go/pkg/mod``
       (module cache) — the roots the Go-era floor carried by hand.
-    - ``npm``/``node``: ``~/.npm`` (fetch cache; ``node_modules`` lives in
-      the worktree, which the worktree-parent grant already covers).
+    - ``npm``: ``~/.npm`` (fetch cache; ``node_modules`` lives in the
+      worktree, which the worktree-parent grant already covers).
+    - ``pnpm``: ``~/.local/share/pnpm/store`` (content-addressable package
+      store) and ``~/.cache/pnpm`` (registry metadata). pnpm hard-links or
+      copies every package out of the store, so without the store bind an
+      install either fails on an unwritable store or silently relocates it
+      into the worktree (``node_modules/.pnpm-store``), diverging from the
+      host. Neither root is an ``XDG_*`` override the allowlist would drop:
+      pnpm falls back to these paths from ``HOME`` alone.
+    - ``yarn``: ``~/.yarn/berry/cache`` (Berry's global cache; Yarn Classic
+      caches inside ``~/.cache/yarn``).
+    - ``bun``: ``~/.bun/install/cache``.
+
+    Tokens are matched as whole argv words, so ``pnpm`` never matches an
+    ``npm`` test and ``env PNPM_HOME=… pnpm install`` still counts.
 
     Only roots that exist on the host are returned: floor ``rw`` paths bind
     with no existence check, so a missing directory would abort every
     sandboxed run. A machine without a cache yet simply contributes
-    nothing — the first ``uv sync`` outside the sandbox creates it.
+    nothing — the first install outside the sandbox creates it.
     """
     argvs = [list(check.argv) for check in config.checks]
     argvs += [list(recipe.prepare_argv) for recipe in config.preparation_recipes]
-    joined = " " + " ".join(" ".join(argv) for argv in argvs if argv) + " "
+    tools = {token for argv in argvs for token in argv}
     roots: list[Path] = []
-    if " uv " in joined:
+    if "uv" in tools:
         roots.append(Path("~/.cache/uv").expanduser())
-    if " go " in joined:
+    if "go" in tools:
         roots.extend(
             [Path("~/.cache/go-build").expanduser(), Path("~/go/pkg/mod").expanduser()]
         )
-    if " npm " in joined:
+    if "npm" in tools:
         roots.append(Path("~/.npm").expanduser())
+    if "pnpm" in tools:
+        roots.extend(
+            [
+                Path("~/.local/share/pnpm/store").expanduser(),
+                Path("~/.cache/pnpm").expanduser(),
+            ]
+        )
+    if "yarn" in tools:
+        roots.extend(
+            [
+                Path("~/.yarn/berry/cache").expanduser(),
+                Path("~/.cache/yarn").expanduser(),
+            ]
+        )
+    if "bun" in tools:
+        roots.append(Path("~/.bun/install/cache").expanduser())
     seen: list[Path] = []
     for root in roots:
         if root not in seen and root.is_dir():

@@ -24,6 +24,15 @@ from packstest.git import git_repo
 from packstest.runner import run_tool
 from packstest.store import MemoryWorkProductStore
 
+# The pack's typed, session-owned policy models (validation-contract tests).
+from pydantic import ValidationError
+from sdk.workproducts import WorkProduct, WorkProductPreparation
+
+from lisa_packs.coding.config import (
+    CodingPackConfig,
+    CodingPreparationRecipe,
+    get_coding_config,
+)
 from lisa_packs.coding.tools.apply_patch.apply_patch import execute as apply_patch
 from lisa_packs.coding.tools.cleanup_worktree.cleanup_worktree import (
     execute as cleanup_worktree,
@@ -33,13 +42,17 @@ from lisa_packs.coding.tools.create_worktree.create_worktree import (
     execute as create_worktree,
 )
 from lisa_packs.coding.tools.edit_files.edit_files import execute as edit_files
-from lisa_packs.coding.tools.edit_files.edit_files import preflight as preflight_edit_files
+from lisa_packs.coding.tools.edit_files.edit_files import (
+    preflight as preflight_edit_files,
+)
 from lisa_packs.coding.tools.export_patches.export_patches import (
     execute as export_patches,
 )
 from lisa_packs.coding.tools.find_files.find_files import execute as find_files
 from lisa_packs.coding.tools.history.history import execute as history
-from lisa_packs.coding.tools.import_commits.import_commits import execute as import_commits
+from lisa_packs.coding.tools.import_commits.import_commits import (
+    execute as import_commits,
+)
 from lisa_packs.coding.tools.list_directory.list_directory import (
     execute as list_directory,
 )
@@ -49,23 +62,18 @@ from lisa_packs.coding.tools.list_worktrees.list_worktrees import (
 from lisa_packs.coding.tools.outline_source.outline_source import (
     execute as outline_source,
 )
+from lisa_packs.coding.tools.prepare_workspace.prepare_workspace import (
+    execute as prepare_workspace,
+)
 from lisa_packs.coding.tools.push.push import execute as push
 from lisa_packs.coding.tools.read_file.read_file import execute as read_file
 from lisa_packs.coding.tools.run_check.run_check import execute as run_check
 from lisa_packs.coding.tools.search_code.search_code import execute as search_code
 from lisa_packs.coding.tools.status.status import execute as status
-
-# The pack's typed, session-owned policy models (validation-contract tests).
-from pydantic import ValidationError
-
-from lisa_packs.coding.config import (
-    CodingPackConfig,
-    CodingPreparationRecipe,
-    get_coding_config,
-)
 from lisa_packs.coding.workflow import (
     ProcessResult,
     dependency_manifest_digest,
+    preparation_is_current,
     preparation_recipe_digest,
 )
 
@@ -1090,6 +1098,65 @@ def test_recipe_prepare_argv_is_session_owned_and_digested(tmp_path: Path) -> No
     assert preparation_recipe_digest(resolved) != preparation_recipe_digest(mutated)
 
 
+def test_node_preparation_staleness_requires_recorded_probe_evidence(tmp_path: Path) -> None:
+    """A ``node_packages`` recipe is current only with recorded ``node_modules``.
+
+    The gate mirrors the Python rule: the recorded value is the probe's
+    certification, so a ready preparation whose evidence never recorded a
+    node_modules path (an interrupted or hand-edited artifact) is stale rather
+    than silently accepted.
+    """
+
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "package.json").write_text('{"name": "app"}\n', encoding="utf-8")
+    config = CodingPackConfig.model_validate(
+        {
+            "workspace_root": str(root),
+            "checks": [{"id": "unit", "argv": ["npm", "test"]}],
+            "preparation_recipes": [
+                {
+                    "id": "node-pnpm",
+                    "prepare_argv": ("pnpm", "install", "--frozen-lockfile"),
+                    "manifest_paths": ["package.json"],
+                    "node_packages": ["demo"],
+                }
+            ],
+        }
+    )
+    recipe = config.preparation_recipes[0]
+    artifact = WorkProduct(
+        workspace_id="w",
+        user_id="u",
+        user_slug="u",
+        surface_type="personal_dm",
+        surface_id="s",
+        session_plan_digest="plan",
+        source_root=str(root),
+    )
+
+    recorded_digest = dependency_manifest_digest(root, recipe=recipe)
+
+    def _artifact(probe_stdout: str) -> WorkProduct:
+        prepared = artifact.model_copy(deep=True)
+        prepared.preparation = WorkProductPreparation(
+            status="ready",
+            recipe_id=recipe.id,
+            recipe_digest=preparation_recipe_digest(recipe),
+            dependency_manifest_digest=recorded_digest,
+            probe_stdout=probe_stdout,
+        )
+        return prepared
+
+    assert not preparation_is_current(_artifact(""), worktree=root, config=config)
+    certified = json.dumps({"node_modules": str(root / "node_modules"), "node_origins": {}})
+    assert preparation_is_current(_artifact(certified), worktree=root, config=config)
+
+    # Editing a declared manifest makes it stale regardless of the evidence.
+    (root / "package.json").write_text('{"name": "app2"}\n', encoding="utf-8")
+    assert not preparation_is_current(_artifact(certified), worktree=root, config=config)
+
+
 def test_module_declaring_recipe_is_author_free_form(tmp_path: Path) -> None:
     """Recipes that probe an interpreter leave check argv entirely session-owned.
 
@@ -1139,7 +1206,7 @@ def test_recipe_manifest_paths_must_be_worktree_relative(tmp_path: Path) -> None
     root = tmp_path / "source"
     root.mkdir()
     for bad in ("/etc/passwd", "../outside.lock"):
-        with pytest.raises(ValidationError, match="manifest path"):
+        with pytest.raises(ValidationError, match="path must be relative"):
             CodingPackConfig.model_validate(
                 {
                     "workspace_root": str(root),
@@ -1153,6 +1220,65 @@ def test_recipe_manifest_paths_must_be_worktree_relative(tmp_path: Path) -> None
                     ],
                 }
             )
+        with pytest.raises(ValidationError, match="path must be relative"):
+            CodingPackConfig.model_validate(
+                {
+                    "workspace_root": str(root),
+                    "checks": [{"id": "unit", "argv": [sys.executable, "-c", "print('ok')"]}],
+                    "preparation_recipes": [
+                        {
+                            "id": "python-uv",
+                            "prepare_argv": ("uv", "sync", "--locked"),
+                            "ignored_paths": (bad,),
+                        }
+                    ],
+                }
+            )
+
+
+def test_required_ignored_paths_follow_the_recipe_toolchain() -> None:
+    """Preparation's ignore guard names only the directories it will create.
+
+    A pnpm project has no ``.venv`` and a uv project has no ``node_modules``;
+    asking either for both would block preparation for a directory the recipe
+    never creates. The toolchain is recognized from whole argv tokens, and
+    declared extras come last without duplicating a derived entry.
+    """
+
+    python_recipe = CodingPreparationRecipe(
+        id="python-uv", prepare_argv=("uv", "sync", "--locked")
+    )
+    assert python_recipe.required_ignored_paths() == (".venv/",)
+
+    node_recipe = CodingPreparationRecipe(
+        id="node-pnpm", prepare_argv=("pnpm", "install", "--frozen-lockfile")
+    )
+    assert node_recipe.required_ignored_paths() == ("node_modules/",)
+
+    # The probe declarations alone imply the directory, even when the prepare
+    # vector is wrapped (a shell shim, a make target) and names no toolchain.
+    assert CodingPreparationRecipe(
+        id="wrapped", prepare_argv=("make", "deps"), node_packages=("react",)
+    ).required_ignored_paths() == ("node_modules/",)
+    assert CodingPreparationRecipe(
+        id="wrapped", prepare_argv=("make", "deps"), project_modules=("app",)
+    ).required_ignored_paths() == (".venv/",)
+
+    # Declared extras are appended; a declared entry that spells a derived
+    # directory without the trailing slash is still the same directory, and
+    # blank declarations are dropped.
+    assert CodingPreparationRecipe(
+        id="mono",
+        prepare_argv=("env", "CI=1", "pnpm", "install"),
+        ignored_paths=(".turbo/", "node_modules", "  "),
+    ).required_ignored_paths() == ("node_modules/", ".turbo/")
+
+    # A self-describing recipe creates no known runtime directory.
+    assert (
+        CodingPreparationRecipe(id="bare", prepare_argv=("make", "deps"))
+        .required_ignored_paths()
+        == ()
+    )
 
 
 def test_recipe_with_unknown_baseline_check_fails_validation(tmp_path: Path) -> None:
@@ -1268,6 +1394,81 @@ async def test_string_typed_edits_decode_to_the_underlying_list(tmp_path: Path) 
     assert Path(artifact.worktree_path, "app.txt").read_text(encoding="utf-8") == (
         "hello edited\n"
     )
+
+
+@pytest.mark.asyncio
+async def test_preparation_ignores_only_the_directories_its_toolchain_creates(
+    tmp_path: Path,
+) -> None:
+    """A pnpm recipe prepares without a ``.venv`` ignore rule, and vice versa.
+
+    The guard used to demand ``.venv/`` from every recipe, which blocked any
+    Node project that never creates one. The derived set now follows the
+    recipe's toolchain, so each project is asked only for what it will write.
+    """
+
+    root = await _repository(tmp_path)
+    (root / ".gitignore").write_text("node_modules/\n.turbo/\n", encoding="utf-8")
+    await _git(root, "add", ".gitignore")
+    await _git(root, "commit", "-m", "ignore node runtime")
+    store = MemoryWorkProductStore()
+    recipes = [
+        {
+            "id": "node-pnpm",
+            "prepare_argv": ("pnpm", "install", "--frozen-lockfile"),
+            "ignored_paths": (".turbo/",),
+        }
+    ]
+    created = await create_worktree(
+        _context(root, store, {"summary": "pnpm guard"}, preparation_recipes=recipes)
+    )
+    artifact_id = created.output_json["artifact_id"]
+    prepared = await prepare_workspace(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "recipe_id": "node-pnpm"},
+            preparation_recipes=recipes,
+        )
+    )
+
+    assert prepared.error == "", prepared.error
+    artifact = await store.get(artifact_id)
+    assert artifact is not None and artifact.preparation is not None
+    assert artifact.preparation.status == "ready"
+    # No Python toolchain: no venv evidence is claimed.
+    assert artifact.preparation.python_path == ""
+
+
+@pytest.mark.asyncio
+async def test_preparation_still_refuses_an_unignored_node_modules(
+    tmp_path: Path,
+) -> None:
+    """The derived directory is still a hard precondition, before any command runs."""
+
+    root = await _repository(tmp_path)
+    (root / ".gitignore").write_text("dist/\n", encoding="utf-8")
+    await _git(root, "add", ".gitignore")
+    await _git(root, "commit", "-m", "ignore dist only")
+    store = MemoryWorkProductStore()
+    recipes = [{"id": "node-pnpm", "prepare_argv": ("pnpm", "install", "--frozen-lockfile")}]
+    created = await create_worktree(
+        _context(root, store, {"summary": "unignored node"}, preparation_recipes=recipes)
+    )
+    artifact_id = created.output_json["artifact_id"]
+    prepared = await prepare_workspace(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "recipe_id": "node-pnpm"},
+            preparation_recipes=recipes,
+        )
+    )
+
+    assert "node_modules must be ignored" in prepared.error
+    artifact = await store.get(artifact_id)
+    assert artifact is not None and artifact.preparation is not None
+    assert artifact.preparation.status == "failed"
 
 
 @pytest.mark.asyncio

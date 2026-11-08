@@ -1,0 +1,22 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      demo:
+        specifier: file:vendor/demo
+        version: file:vendor/demo
+
+packages:
+
+  demo@file:vendor/demo:
+    resolution: {directory: vendor/demo, type: directory}
+
+snapshots:
+
+  demo@file:vendor/demo: {}

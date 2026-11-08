@@ -9,6 +9,7 @@ fields. Deterministic: the only I/O is Git inside tmp dirs; no model calls.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -97,7 +98,11 @@ async def _step(
 
 
 def _real_sandbox(
-    factory: ToolContextFactory, *, bwrap_path: Path, read_only_paths: tuple[Path, ...] = ()
+    factory: ToolContextFactory,
+    *,
+    bwrap_path: Path,
+    read_only_paths: tuple[Path, ...] = (),
+    writable_paths: tuple[Path, ...] = (),
 ) -> ToolContextFactory:
     """Dispatch contained commands through the real bwrap pack, without mocks."""
 
@@ -105,6 +110,7 @@ def _real_sandbox(
         str(factory.root): "ro",
         str(factory.data_dir or factory.root / ".packstest-data" / "git-worktrees"): "rw",
         **{str(path): "ro" for path in read_only_paths},
+        **{str(path): "rw" for path in writable_paths},
     }
     floor = {
         "execution": "sandbox",
@@ -589,6 +595,422 @@ async def test_real_python_preparation_and_repair_trajectory(
         blocked.result.error,
     ]
     write_trajectory(trajectory, tmp_path / "trajectory-python-preparation-repair.json")
+
+
+#: A vendored ``file:`` dependency keeps the fixture installable with
+#: ``--offline``: pnpm resolves it from the checkout, never the registry, so
+#: the trajectory needs no network and no warm store.
+_NODE_FILES = {
+    ".gitignore": "node_modules/\n",
+    "vendor/demo/package.json": (
+        '{\n  "name": "demo",\n  "version": "1.0.0",\n  "main": "index.js"\n}\n'
+    ),
+    "vendor/demo/index.js": "module.exports = { value: 41 };\n",
+    "package.json": (
+        '{\n'
+        '  "name": "node-eval-fixture",\n'
+        '  "version": "0.1.0",\n'
+        '  "private": true,\n'
+        '  "type": "module",\n'
+        '  "scripts": {\n'
+        '    "test": "node --test"\n'
+        '  },\n'
+        '  "dependencies": {\n'
+        '    "demo": "file:vendor/demo"\n'
+        '  }\n'
+        '}\n'
+    ),
+    "pnpm-lock.yaml": (
+        "lockfileVersion: '9.0'\n"
+        "\n"
+        "settings:\n"
+        "  autoInstallPeers: true\n"
+        "  excludeLinksFromLockfile: false\n"
+        "\n"
+        "importers:\n"
+        "\n"
+        "  .:\n"
+        "    dependencies:\n"
+        "      demo:\n"
+        "        specifier: file:vendor/demo\n"
+        "        version: file:vendor/demo\n"
+        "\n"
+        "packages:\n"
+        "\n"
+        "  demo@file:vendor/demo:\n"
+        "    resolution: {directory: vendor/demo, type: directory}\n"
+        "\n"
+        "snapshots:\n"
+        "\n"
+        "  demo@file:vendor/demo: {}\n"
+    ),
+    "sum.ts": (
+        'import demo from "demo";\n'
+        "\n"
+        "export function total(extra: number): number {\n"
+        "    return demo.value + extra;\n"
+        "}\n"
+    ),
+    "sum.test.ts": (
+        'import test from "node:test";\n'
+        'import assert from "node:assert";\n'
+        'import { total } from "./sum.ts";\n'
+        "\n"
+        'test("total adds the package value", () => {\n'
+        "    assert.equal(total(1), 42);\n"
+        "});\n"
+    ),
+}
+
+
+async def _node_preparation_fixture(
+    tmp_path: Path, unignored_path: str | None
+) -> ToolContextFactory:
+    """Seed an offline pnpm/TypeScript fixture with real sandbox dispatch."""
+
+    bwrap_path = PACK_PATH.parent.parent / "lisa-packs" / "bwrap"
+    pnpm = shutil.which("pnpm")
+    if not bwrap_path.is_dir() or pnpm is None:
+        pytest.skip("This offline integration requires the bwrap checkout and pnpm.")
+
+    repo = await git_repo(tmp_path, with_remote=False)
+    for path, text in _NODE_FILES.items():
+        content = text
+        if path == ".gitignore" and unignored_path is not None:
+            content = ""
+        await repo.commit_file(path, content, f"seed {path}")
+    factory = ToolContextFactory(
+        root=repo.root,
+        data_dir=tmp_path / "data",
+        pack_config={
+            "workspace_root": str(repo.root),
+            "checks": [
+                {
+                    # ``node --test`` discovers ``*.test.ts`` natively and runs
+                    # it through Node's own type stripping, so the check needs
+                    # no dependency download and no separate compiler binary.
+                    "id": "unit",
+                    "argv": [pnpm, "run", "test"],
+                    "timeout_seconds": 120,
+                }
+            ],
+            "required_check_ids": ["unit"],
+            "preparation_recipes": [
+                {
+                    "id": "node-pnpm",
+                    "prepare_argv": [
+                        pnpm,
+                        "install",
+                        "--frozen-lockfile",
+                        "--offline",
+                    ],
+                    "manifest_paths": ["package.json", "pnpm-lock.yaml"],
+                    "node_packages": ["demo"],
+                    "baseline_check_ids": ["unit"],
+                    "timeout_seconds": 120,
+                }
+            ],
+        },
+    )
+    factory.identity["task_id"] = "node-preparation-task"
+    # A real session finds pnpm on PATH in a system bin directory that the
+    # sandbox already exposes. This harness may resolve a pnpm installed under
+    # a temporary prefix outside those directories, so bind that prefix
+    # read-only and let the sandbox see the same executable.
+    pnpm_prefix = next(
+        parent
+        for parent in Path(pnpm).resolve().parents
+        if parent.name == "node_modules"
+    ).parent
+    # pnpm resolves its content store and metadata cache from HOME alone, and
+    # the bwrap child env passes HOME through unchanged. These are exactly the
+    # roots ``lisa_packs.coding.sandbox`` derives from a pnpm argv, so binding
+    # them here is the hand-authored equivalent of the pack's contribution —
+    # and the trajectory would fail without them (pnpm cannot open its store
+    # operation lock under a read-only home).
+    pnpm_store = tmp_path / "pnpm-store"
+    pnpm_cache = tmp_path / "pnpm-cache"
+    pnpm_store.mkdir()
+    pnpm_cache.mkdir()
+    _real_sandbox(
+        factory,
+        bwrap_path=bwrap_path,
+        read_only_paths=(Path(sys.base_prefix), pnpm_prefix),
+        writable_paths=(pnpm_store, pnpm_cache),
+    )
+    # The child env's HOME is the real one, so the store and cache locations
+    # are pinned explicitly. These are the same two roots the pack's floor
+    # contribution derives for a pnpm argv — this trajectory is what fails
+    # without them (ERR_PNPM_STORE_DIR_OPEN_OPERATION_LOCK, os error 30).
+    factory.pack_config["preparation_recipes"][0]["prepare_argv"] = [
+        pnpm,
+        "install",
+        "--frozen-lockfile",
+        "--offline",
+        f"--store-dir={pnpm_store}",
+        f"--cache-dir={pnpm_cache}",
+    ]
+    factory.pack_config["checks"][0]["argv"] = [
+        pnpm,
+        f"--store-dir={pnpm_store}",
+        f"--cache-dir={pnpm_cache}",
+        "run",
+        "test",
+    ]
+    return factory
+
+
+def _node_source_sha(path: str) -> str:
+    """Return the seeded digest for one fixture file."""
+
+    return hashlib.sha256(_NODE_FILES[path].encode("utf-8")).hexdigest()
+
+
+@pytest.mark.eval
+@pytest.mark.asyncio
+async def test_real_pnpm_typescript_preparation(
+    tmp_path: Path,
+    catalog: dict[str, dict[str, object]],
+) -> None:
+    """Real pnpm preparation certifies node_modules before a TypeScript edit commits.
+
+    Covers the pnpm/TypeScript path end to end: the worktree-local install
+    (including pnpm's ``node_modules/.pnpm`` virtual store), the Node
+    provenance probe's certification that the declared package resolves
+    inside the worktree, a baseline ``node --test`` run, preparation
+    staleness riding ``pnpm-lock.yaml``, and a commit gated on the
+    committed tree.
+    """
+
+    factory = await _node_preparation_fixture(tmp_path, unignored_path=None)
+    source_snapshot = await _source_snapshot(factory)
+    trajectory = Trajectory(name="real-pnpm-preparation")
+    created = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_create_worktree",
+        {"summary": "TypeScript total"},
+    )
+    assert created.result.error == "", created.result.error
+    artifact_id = str(created.result.output_json["artifact_id"])
+    worktree = Path(str(created.result.output_json["worktree_path"]))
+
+    unprepared = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_run_check",
+        {"artifact_id": artifact_id, "check_id": "unit"},
+    )
+    assert "Workspace preparation is missing or stale" in unprepared.result.error
+
+    prepared = await _step(
+        catalog, factory, trajectory, "coding_prepare_workspace", {"artifact_id": artifact_id}
+    )
+    assert prepared.result.error == "", prepared.result.error
+    assert prepared.result.output_json["node_modules"] == str(worktree / "node_modules")
+
+    artifact = await factory.artifact_store.get(artifact_id)
+    assert artifact is not None and artifact.preparation is not None
+    preparation = artifact.preparation
+    assert preparation.status == "ready"
+    assert preparation.recipe_digest and preparation.dependency_manifest_digest
+    # No Python toolchain: the preparation never claims interpreter evidence.
+    assert preparation.python_path == ""
+    evidence = json.loads(preparation.probe_stdout)
+    assert evidence["node_modules"] == str(worktree / "node_modules")
+    # pnpm links through its virtual store, and the probe reports the real
+    # path — still inside the worktree, which is the property that matters.
+    assert evidence["node_origins"]["demo"].startswith(
+        str(worktree / "node_modules") + os.sep
+    )
+    # The baseline TypeScript check ran against the prepared install.
+    assert preparation.baseline_checks["unit"].status == "passed"
+    assert (
+        preparation.baseline_checks["unit"].checked_tree_sha
+        == preparation.baseline_tree_sha
+    )
+    assert artifact.checks == {}
+
+    read_source = await _step(
+        catalog, factory, trajectory, "coding_read_file", {"path": "sum.ts"}
+    )
+    assert read_source.result.error == "", read_source.result.error
+    assert read_source.result.output_json["scope"] == "worktree"
+    outline = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_outline_source",
+        {"path": "sum.ts"},
+    )
+    assert outline.result.error == "", outline.result.error
+    assert {"kind": "declaration", "name": "total", "line": 3} in (
+        outline.result.output_json["items"]
+    )
+
+    edited = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_edit_files",
+        {
+            "artifact_id": artifact_id,
+            "edits": [
+                {
+                    "kind": "update",
+                    "path": "sum.ts",
+                    "expected_sha256": _node_source_sha("sum.ts"),
+                    "replacements": [
+                        {"old_text": "demo.value + extra", "new_text": "demo.value + extra + 1"}
+                    ],
+                },
+                {
+                    "kind": "update",
+                    "path": "sum.test.ts",
+                    "expected_sha256": _node_source_sha("sum.test.ts"),
+                    "replacements": [{"old_text": "total(1), 42", "new_text": "total(1), 43"}],
+                },
+            ],
+        },
+    )
+    assert edited.result.error == "", edited.result.error
+    failing = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_run_check",
+        {"artifact_id": artifact_id, "check_id": "unit"},
+    )
+    assert failing.result.error == "", failing.result.error
+    assert failing.result.output_json["status"] == "passed"
+
+    # A lockfile edit makes the recorded preparation stale: the gate must
+    # notice before the next check runs.
+    lockfile = await _step(
+        catalog, factory, trajectory, "coding_read_file", {"path": "pnpm-lock.yaml"}
+    )
+    assert lockfile.result.error == "", lockfile.result.error
+    bumped = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_edit_files",
+        {
+            "artifact_id": artifact_id,
+            "edits": [
+                {
+                    "kind": "update",
+                    "path": "pnpm-lock.yaml",
+                    "expected_sha256": lockfile.result.output_json["content_sha256"],
+                    "replacements": [
+                        {
+                            "old_text": "  excludeLinksFromLockfile: false\n",
+                            "new_text": "  excludeLinksFromLockfile: false\n\n# bumped\n",
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    assert bumped.result.error == "", bumped.result.error
+    stale = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_run_check",
+        {"artifact_id": artifact_id, "check_id": "unit"},
+    )
+    assert "Workspace preparation is missing or stale" in stale.result.error
+    reprepared = await _step(
+        catalog, factory, trajectory, "coding_prepare_workspace", {"artifact_id": artifact_id}
+    )
+    assert reprepared.result.error == "", reprepared.result.error
+    rechecked = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_run_check",
+        {"artifact_id": artifact_id, "check_id": "unit"},
+    )
+    assert rechecked.result.error == "", rechecked.result.error
+    assert rechecked.result.output_json["status"] == "passed"
+
+    committed = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_commit",
+        {
+            "artifact_id": artifact_id,
+            "message": "feat: total adds one more from the pnpm worktree",
+        },
+    )
+    assert committed.result.error == "", committed.result.error
+    commit_sha = str(committed.result.output_json["commit_sha"])
+    assert len(commit_sha) == SHA1_HEX_LENGTH
+    # node_modules must stay out of the commit even though preparation wrote it.
+    committed_tree = await run_git(
+        worktree,
+        ("ls-tree", "-r", "--name-only", commit_sha),
+        config=get_coding_config(factory.context()),
+    )
+    assert committed_tree.return_code == 0, committed_tree.stderr
+    assert "node_modules" not in committed_tree.stdout
+    assert "sum.ts" in committed_tree.stdout
+
+    cleaned = await _step(
+        catalog, factory, trajectory, "coding_cleanup_worktree", {"artifact_id": artifact_id}
+    )
+    assert cleaned.result.error == "", cleaned.result.error
+    assert not worktree.exists()
+    assert await _source_snapshot(factory) == source_snapshot
+    write_trajectory(trajectory, tmp_path / "trajectory-pnpm-preparation.json")
+
+
+@pytest.mark.eval
+@pytest.mark.asyncio
+async def test_pnpm_preparation_refuses_an_unignored_node_modules(
+    tmp_path: Path,
+    catalog: dict[str, dict[str, object]],
+) -> None:
+    """A pnpm recipe fails before creating runtime paths when node_modules isn't ignored."""
+
+    factory = await _node_preparation_fixture(tmp_path, unignored_path="node_modules/")
+    source_snapshot = await _source_snapshot(factory)
+    trajectory = Trajectory(name="pnpm-unignored")
+    created = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_create_worktree",
+        {"summary": "unignored"},
+    )
+    assert created.result.error == "", created.result.error
+    artifact_id = str(created.result.output_json["artifact_id"])
+    worktree = Path(str(created.result.output_json["worktree_path"]))
+    prepared = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_prepare_workspace",
+        {"artifact_id": artifact_id},
+    )
+    assert "node_modules must be ignored" in prepared.result.error
+    assert not (worktree / "node_modules").exists()
+    artifact = await factory.artifact_store.get(artifact_id)
+    assert artifact is not None and artifact.preparation is not None
+    assert artifact.preparation.status == "failed"
+    cleaned = await _step(
+        catalog,
+        factory,
+        trajectory,
+        "coding_cleanup_worktree",
+        {"artifact_id": artifact_id},
+    )
+    assert cleaned.result.error == "", cleaned.result.error
+    assert await _source_snapshot(factory) == source_snapshot
 
 
 async def _source_snapshot(factory: ToolContextFactory) -> tuple[str, ...]:

@@ -62,6 +62,38 @@ for name in sys.argv[2:]:
 print(json.dumps({'python': str(python), 'origins': origins}, sort_keys=True))
 """
 
+#: Node analogue of ``_PROBE``: certify that every declared package resolves
+#: into the worktree's own ``node_modules``. ``createRequire`` is anchored at
+#: the worktree's ``package.json``, so it walks exactly the resolution the
+#: project's own imports use — including pnpm's symlinked virtual store, whose
+#: real path stays inside ``<worktree>/node_modules/.pnpm``. Resolution that
+#: escapes (a hoisted host install, a global package) fails loudly instead of
+#: letting checks silently exercise the wrong tree.
+_NODE_PROBE = """const { createRequire } = require('node:module');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const root = fs.realpathSync(path.resolve(process.argv[1]));
+const requireFromWorktree = createRequire(path.join(root, 'package.json'));
+const modulesRoot = path.join(root, 'node_modules');
+const origins = {};
+for (const name of process.argv.slice(2)) {
+    let resolved;
+    try {
+        resolved = requireFromWorktree.resolve(name);
+    } catch (error) {
+        throw new Error(`package does not resolve from the worktree: ${name}`);
+    }
+    const real = fs.realpathSync(resolved);
+    const relative = path.relative(modulesRoot, real);
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+        throw new Error(`package resolves outside worktree node_modules: ${name} -> ${real}`);
+    }
+    origins[name] = real;
+}
+process.stdout.write(JSON.stringify({ node_modules: modulesRoot, origins }, null, 0));
+"""
+
 
 class Parameters(BaseModel):
     """Request a finite session-configured workspace preparation recipe."""
@@ -70,14 +102,30 @@ class Parameters(BaseModel):
     recipe_id: str | None = Field(default=None, min_length=1, max_length=80)
 
 
-async def _require_venv_ignored(worktree: Path, *, config) -> None:
-    result = await run_git(
-        worktree, ("check-ignore", "-q", "--", ".venv/"), config=config
-    )
-    if result.return_code != 0:
-        raise CodingWorkflowError(
-            ".venv must be ignored before preparing a workspace."
+async def _require_ignored_paths(worktree: Path, *, recipe, config) -> None:
+    """Require every runtime directory preparation creates to be Git-ignored.
+
+    The directories are the recipe's own toolchain-derived set (see
+    :meth:`CodingPreparationRecipe.required_ignored_paths`), so a pnpm
+    project is never asked to ignore a ``.venv`` it does not create. The
+    check runs *before* the prepare command, so an unignored directory can
+    never pollute the worktree or the baseline tree hash.
+    """
+
+    for raw in recipe.required_ignored_paths():
+        # ``git check-ignore`` matches a directory rule only against a
+        # trailing-slash pathspec; the derivation already normalizes to one,
+        # but declaring ``/node_modules`` without the slash also ignores the
+        # tree, so the probe stays tolerant of the rule's spelling.
+        candidate = raw if raw.endswith("/") else f"{raw}/"
+        result = await run_git(
+            worktree, ("check-ignore", "-q", "--", candidate), config=config
         )
+        if result.return_code != 0:
+            stripped = raw.rstrip("/")
+            raise CodingWorkflowError(
+                f"{stripped} must be ignored before preparing a workspace."
+            )
 
 
 def _record_baseline_check(
@@ -122,7 +170,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             ctx, artifact_id=params.artifact_id, config=config, claim=True
         )
         worktree = artifact_worktree(artifact, config=config)
-        await _require_venv_ignored(worktree, config=config)
+        await _require_ignored_paths(worktree, recipe=recipe, config=config)
         manifest_digest = dependency_manifest_digest(worktree, recipe=recipe)
         recipe_digest = preparation_recipe_digest(recipe)
         prepared = await run_contained(
@@ -178,6 +226,41 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             raise CodingWorkflowError(
                 "Preparation did not create the worktree-owned Python interpreter."
             )
+        node_modules = worktree / "node_modules"
+        node_evidence: dict[str, object] = {}
+        if recipe.node_packages and not node_modules.is_dir():
+            raise CodingWorkflowError(
+                "Preparation did not create the worktree-owned node_modules."
+            )
+        if recipe.node_packages:
+            # Node runs the probe from the worktree's own module graph via
+            # ``createRequire(package.json)``, so the resolution under test is
+            # the one the project's imports use — pnpm's symlinked virtual
+            # store certified through its real path inside ``node_modules``.
+            # ``node`` needs no cache grant, so unlike the uv probe there is
+            # no floor interaction to absorb.
+            node_probed = await run_contained(
+                ctx,
+                ("node", "-e", _NODE_PROBE, "--", str(worktree), *recipe.node_packages),
+                worktree=worktree,
+                timeout_seconds=recipe.timeout_seconds,
+            )
+            if node_probed.timed_out or node_probed.return_code != 0:
+                raise CodingWorkflowError(
+                    node_probed.stderr.strip()
+                    or "worktree node package provenance probe failed"
+                )
+            node_evidence = json.loads(node_probed.stdout)
+            # Merge under namespaced keys: a Python-only recipe's evidence
+            # keeps its exact historical shape (``python`` plus ``origins``),
+            # which recorded artifacts and their assertions read.
+            merged = json.loads(probe_stdout) if probe_stdout else {}
+            merged["node_modules"] = node_evidence.get("node_modules", "")
+            merged["node_origins"] = node_evidence.get("origins", {})
+            probe_stdout = json.dumps(merged, sort_keys=True)
+            probe_stderr = "\n".join(
+                part for part in (probe_stderr, node_probed.stderr) if part.strip()
+            )
         baseline_tree = await candidate_tree_sha(worktree, config=config)
         baseline_checks: dict[str, WorkProductCheck] = {}
         for check_id in recipe.baseline_check_ids:
@@ -231,6 +314,11 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             "artifact_id": artifact.artifact_id,
             "recipe_id": recipe.id,
             "python_path": artifact.preparation.python_path,
+            "node_modules": (
+                str(node_modules)
+                if recipe.node_packages and node_modules.is_dir()
+                else ""
+            ),
             "baseline_checks": sorted(artifact.preparation.baseline_checks),
         },
     )

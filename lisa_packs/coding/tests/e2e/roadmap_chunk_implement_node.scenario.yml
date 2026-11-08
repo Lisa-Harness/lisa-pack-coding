@@ -1,0 +1,56 @@
+# TypeScript/pnpm analogue of coding/roadmap-chunk-implement: a pnpm project
+# whose checks run through the configured recipe (pnpm install --frozen-lockfile)
+# and whose TypeScript is executed by Node's own type stripping, so the
+# scenario needs no downloaded toolchain beyond the lockfile's file dependency.
+# Judged by a hidden acceptance test that mirrors acceptance/nodesum_apply_discount.sh.
+# Run: uv run lisa-e2e run <this file>   (from the lisa framework checkout)
+id: coding/roadmap-chunk-implement-node
+session_context: session_context_node.md
+fixture:
+  repo: fixtures/nodesum
+packs:
+  - lisa-pack-bash
+  - lisa-pack-bwrap
+  - lisa-pack-coding
+  - lisa-pack-markdown
+  - lisa-pack-personas
+turns:
+  - >-
+    Look at the TypeScript helper in the coding workspace and tell me what it
+    does today, who would call it, and what it is missing for real reporting
+    work.
+  - >-
+    Add a discount helper next to it: "apply-discount" should take an amount
+    and return the amount with a 15% discount applied, rounded to cents.
+    Negative amounts should raise a RangeError rather than returning a value.
+    Write it up as a short design note in the repo before you code, and keep
+    the existing total() helper working.
+  - cool cool. Ok, let's implement that.
+approvals:
+  approve: ["*"]
+  deny: [coding_push, coding_cleanup_worktree]
+budgets:
+  max_messages: 20
+  max_continues: 0
+  max_yield_replies: 0
+  wall_clock_s: 3600
+oracles:
+  hygiene:
+    - not_aborted: {}
+    - no_turn_errors: {}
+    - no_operator_exit: {}
+    - no_unanswered_yield: {}
+    - no_runtime_errors: {}
+  review:
+    - receipt: {capability: [coding_read_file, coding_search_code, coding_outline_source]}
+  design:
+    - data_check: {argv: [grep, -rlq, --include=*.md, -i, discount, .]}
+  implement:
+    - baseline_fails: {argv: [bash, "${SCENARIO_DIR}/acceptance/nodesum_apply_discount.sh"]}
+    - workproduct_committed: {}
+    - branch_prefix: {prefix: "lisa/"}
+    - main_untouched: {}
+    - checks_current: {}
+    - worktree_clean: {}
+    - independent_check: {argv: [pnpm, run, test], timeout_s: 300}
+    - independent_check: {argv: [bash, "${SCENARIO_DIR}/acceptance/nodesum_apply_discount.sh"], timeout_s: 300}
