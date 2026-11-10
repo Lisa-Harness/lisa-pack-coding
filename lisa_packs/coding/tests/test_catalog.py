@@ -135,6 +135,14 @@ def test_execute_mode_carries_full_write_lifecycle() -> None:
     allowed = set(modes["coding_execute"].get("allowed_tool_ids") or ())
     assert _ALL_TOOLS <= allowed, allowed
     assert "github_open_pull_request" in allowed
+    # Cross-pack PR lifecycle: reads open the feedback loop; comment/reply and
+    # edit stay approval-gated external writes owned by the github pack.
+    assert {
+        "github_pr_get",
+        "github_ci_logs",
+        "github_pr_comment",
+        "github_pr_update",
+    } <= allowed
 
 
 def test_edit_descriptions_prefer_original_snapshot_replacements() -> None:

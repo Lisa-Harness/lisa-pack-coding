@@ -58,6 +58,10 @@ allowed_tool_ids:
   - coding_cleanup_worktree
   - coding_read_copilot_customizations
   - github_open_pull_request
+  - github_pr_get
+  - github_ci_logs
+  - github_pr_comment
+  - github_pr_update
   - fetch_page
 description: "Mutates the coding workspace, writes code, and validates the outcome with a checked commit."
 ---
