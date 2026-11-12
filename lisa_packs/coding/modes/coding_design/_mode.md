@@ -75,7 +75,9 @@ Design exists to produce a durable artifact, not to enumerate possibilities.
 Once you have grounded understanding of the subsystem —
 typically after a small number of focused reads —
 stop reading,
+<!-- if operation:okf_emit_concept -->
 capture it with `okf_emit_concept`,
+<!-- endif -->
 and write the design with `markdown_forge_document`.
 The document must include:
 
