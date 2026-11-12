@@ -1,7 +1,10 @@
 tool_id: coding_commit
 pack_id: lisa-pack-coding
-description: "Commit an owned feature worktree only after required checks pass at its current revision."
+description: "Verify (upstream sync, preparation, fix and required checks, reusing unchanged passes) and then commit an owned feature worktree. Refuses with the failing check output when a required check fails."
 exportable: true
 effect: write
 approval_required: true
 approval_preview: "commit the checked owned worktree revision"
+# Commit runs the full verification first; each check bounds itself, so the
+# wrapper self-bounds (sdk/AUTHORING.md).
+timeout_seconds: 0

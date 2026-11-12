@@ -25,8 +25,24 @@ class CodingCheck(BaseModel):
     argv: tuple[str, ...] = Field(min_length=1)
     timeout_seconds: int = Field(default=300, ge=1, le=1800)
     #: ``verify`` must leave files untouched; ``fix`` (formatters, autofixers)
-    #: may rewrite them and its edits become a new artifact revision.
+    #: may rewrite them and its edits become a new artifact revision. Fixers
+    #: must be idempotent: a successful run certifies its output tree as a
+    #: fixed point.
     kind: Literal["verify", "fix"] = "verify"
+    #: Repository-relative globs (``**``, ``*``, ``?``; a trailing ``/``
+    #: selects a whole directory) naming every tracked file the check reads.
+    #: A passing result is reused while no matching file changes, so a docs
+    #: edit does not rerun the type checker. Empty means the whole tree: the
+    #: result is reused only for an identical candidate tree.
+    inputs: tuple[str, ...] = Field(default=(), max_length=50)
+    #: ``False`` reruns the check on every verification (nondeterministic or
+    #: network-dependent checks whose result the inputs cannot pin).
+    reuse: bool = True
+    #: Earlier checks that must pass in the same verification before this one
+    #: runs; when any fails, this check is skipped instead of burning its
+    #: timeout on a tree already known to be broken. Verify checks only:
+    #: fixers always run first, to a fixed point.
+    needs: tuple[str, ...] = Field(default=(), max_length=20)
 
 
 #: Package managers whose install stage materializes a worktree ``node_modules``.
@@ -119,6 +135,9 @@ class CodingPackConfig(BaseModel):
     checks: tuple[CodingCheck, ...] = ()
     required_check_ids: tuple[str, ...] = ()
     preparation_recipes: tuple[CodingPreparationRecipe, ...] = ()
+    #: Local branch new worktrees start from and stay rebased onto. Empty
+    #: tracks the source checkout's current HEAD.
+    base_branch: str = Field(default="", max_length=200)
     branch_prefix: str = Field(default="lisa/", min_length=1, max_length=80)
     protected_branches: tuple[str, ...] = ("main", "master")
     max_directory_entries: int = Field(default=200, ge=1, le=1000)
@@ -144,6 +163,27 @@ class CodingPackConfig(BaseModel):
         check_ids = [check.id for check in self.checks]
         if len(check_ids) != len(set(check_ids)):
             raise ValueError("checks must use unique IDs")
+        for index, check in enumerate(self.checks):
+            if check.needs and check.kind == "fix":
+                raise ValueError(f"fix check '{check.id}' must not declare needs")
+            earlier = set(check_ids[:index])
+            unknown_needs = sorted(set(check.needs) - earlier)
+            if unknown_needs:
+                raise ValueError(
+                    f"check '{check.id}' needs must name earlier checks: "
+                    + ", ".join(unknown_needs)
+                )
+            for raw in check.inputs:
+                # Matched verbatim against git's repository-relative paths, so
+                # every segment must be a real name: no ``./``, ``..``, ``//``.
+                segments = raw.removesuffix("/").split("/")
+                if raw.startswith("/") or any(
+                    segment in {"", ".", ".."} for segment in segments
+                ):
+                    raise ValueError(
+                        f"check '{check.id}' input must be a normalized relative "
+                        f"glob: {raw!r}"
+                    )
         unknown_required = sorted(set(self.required_check_ids) - set(check_ids))
         if unknown_required:
             raise ValueError(

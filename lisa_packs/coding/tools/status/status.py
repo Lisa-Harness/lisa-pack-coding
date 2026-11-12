@@ -1,8 +1,10 @@
 """Inspect the durable and Git status of an owned coding worktree.
 
-Also resolves the source checkout's current tip and reports it beside the
-artifact's base so base drift is visible; a drifted artifact with a commit
-gets an explicit prompt to rebase promptly.
+Also resolves the upstream tip and reports it beside the artifact's base so
+drift is visible; the next edit, verification, or commit rebases onto it
+automatically. Check records carry only failure excerpts and the diff only its
+stat, keeping a routine status call small (``coding_git_diff`` shows the full
+diff).
 """
 
 from __future__ import annotations
@@ -11,6 +13,8 @@ from kernel.models import ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
 
 from lisa_packs.coding.config import get_coding_config
+from lisa_packs.coding.freshness import resolve_upstream_tip
+from lisa_packs.coding.verification import failure_excerpt
 from lisa_packs.coding.workflow import (
     CodingWorkflowError,
     artifact_worktree,
@@ -42,30 +46,17 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         worktree = artifact_worktree(artifact, config=config)
         status = await run_git(worktree, ("status", "--short"), config=config)
         diff_stat = await run_git(worktree, ("diff", "--stat"), config=config)
-        diff = await run_git(worktree, ("diff", "--no-ext-diff"), config=config)
-        if (
-            status.return_code != 0
-            or diff_stat.return_code != 0
-            or diff.return_code != 0
-        ):
+        if status.return_code != 0 or diff_stat.return_code != 0:
             raise CodingWorkflowError(
-                status.stderr.strip()
-                or diff_stat.stderr.strip()
-                or diff.stderr.strip()
-                or "git status failed"
+                status.stderr.strip() or diff_stat.stderr.strip() or "git status failed"
             )
-        source_head = await run_git(source_root, ("rev-parse", "HEAD"), config=config)
-        source_branch = await run_git(
-            source_root, ("branch", "--show-current"), config=config
-        )
-        if source_head.return_code != 0 or source_branch.return_code != 0:
-            raise CodingWorkflowError(
-                source_head.stderr.strip()
-                or source_branch.stderr.strip()
-                or "Cannot resolve the source checkout tip."
+        source_head_sha = await resolve_upstream_tip(source_root, config=config)
+        source_branch_name = config.base_branch
+        if not source_branch_name:
+            source_branch = await run_git(
+                source_root, ("branch", "--show-current"), config=config
             )
-        source_head_sha = source_head.stdout.strip()
-        source_branch_name = source_branch.stdout.strip()
+            source_branch_name = source_branch.stdout.strip()
         ahead = False
         if artifact.base_sha and artifact.base_sha != source_head_sha:
             ancestor = await run_git(
@@ -85,7 +76,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         f"Artifact {artifact.artifact_id} is {artifact.status} at revision "
         f"{artifact.revision}."
     )
-    if ahead and artifact.commit_sha:
+    if ahead:
         source_label = (
             f"source branch {source_branch_name}"
             if source_branch_name
@@ -93,8 +84,8 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         )
         text += (
             f" The {source_label} has moved ahead of the artifact base "
-            f"{artifact.base_sha}; rebase promptly onto {source_head_sha} with "
-            "coding_history (op=rebase)."
+            f"{artifact.base_sha}; the next edit, coding_verify, or coding_commit "
+            f"rebases onto {source_head_sha} automatically."
         )
 
     return ToolResult(
@@ -113,8 +104,6 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             "source_ahead_of_base": ahead,
             "git_status": status.stdout.strip() or "(clean)",
             "git_diff_stat": diff_stat.stdout.strip() or "(no diff)",
-            "git_diff": diff.stdout,
-            "git_diff_truncated": diff.output_truncated,
             "configured_check_ids": [check.id for check in config.checks],
             "configured_preparation_recipe_ids": [
                 r.id for r in config.preparation_recipes
@@ -127,9 +116,9 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
                 check_id: {
                     "status": record.status,
                     "revision": record.revision,
-                    "argv": record.argv,
-                    "stdout": record.stdout,
-                    "stderr": record.stderr,
+                    "failure_excerpt": ""
+                    if record.status == "passed"
+                    else failure_excerpt(record.stdout, record.stderr),
                     "duration_ms": record.duration_ms,
                     "completed_at": record.completed_at.isoformat()
                     if record.completed_at

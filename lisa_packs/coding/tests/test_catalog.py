@@ -44,7 +44,7 @@ _LOCAL_WRITE_TOOLS = {
     "coding_edit_files",
     "coding_import_commits",
     "coding_prepare_workspace",
-    "coding_run_check",
+    "coding_verify",
     "coding_record_fact",
     "coding_commit",
     "coding_export_patches",

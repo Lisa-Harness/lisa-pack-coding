@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from kernel.models import ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
 
-from kernel.models import ToolExecutionContext, ToolResult
 from lisa_packs.coding.config import get_coding_config
+from lisa_packs.coding.freshness import SyncOutcome, sync_and_save, with_sync_note
 from lisa_packs.coding.workflow import (
     CodingWorkflowError,
     artifact_worktree,
@@ -149,6 +150,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     params = Parameters.model_validate(ctx.parameters)
     patch = normalize_patch(params.patch)
     patch = separate_file_sections(patch)
+    sync: SyncOutcome | None = None
     try:
         config = get_coding_config(ctx)
         if len(patch.encode("utf-8")) > config.max_patch_bytes:
@@ -162,6 +164,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             claim=True,
         )
         worktree = artifact_worktree(artifact, config=config)
+        sync = await sync_and_save(ctx, artifact, worktree=worktree, config=config)
         checked = await run_git(
             worktree,
             ("apply", "--check", *_APPLY_FLAGS, "-"),
@@ -184,12 +187,13 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         artifact.status = "patched"
         await ctx.code_change_artifact_store.save(artifact)
     except (CodingWorkflowError, OSError, ValueError) as exc:
-        return ToolResult(tool_id=TOOL_ID, error=str(exc))
+        return ToolResult(tool_id=TOOL_ID, error=with_sync_note(str(exc), sync))
 
     return ToolResult(
         tool_id=TOOL_ID,
-        output_text=(
-            f"Applied patch to {len(affected_paths)} paths at revision {artifact.revision}."
+        output_text=with_sync_note(
+            f"Applied patch to {len(affected_paths)} paths at revision {artifact.revision}.",
+            sync,
         ),
         output_json={
             "artifact_id": artifact.artifact_id,

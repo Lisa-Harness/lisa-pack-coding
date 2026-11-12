@@ -11,12 +11,17 @@ from pathlib import Path
 from kernel.models import ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
 from sdk.workproducts import (
+    WorkProduct,
     WorkProductCheck,
     WorkProductCheckStatus,
     WorkProductPreparation,
 )
 
-from lisa_packs.coding.config import CodingPreparationRecipe, get_coding_config
+from lisa_packs.coding.config import (
+    CodingPackConfig,
+    CodingPreparationRecipe,
+    get_coding_config,
+)
 from lisa_packs.coding.workflow import (
     CodingWorkflowError,
     artifact_worktree,
@@ -157,18 +162,21 @@ def _record_baseline_check(
     )
 
 
-async def execute(ctx: ToolExecutionContext) -> ToolResult:
-    """Run and verify one finite session-configured preparation recipe."""
+async def prepare_artifact(
+    ctx: ToolExecutionContext,
+    artifact: WorkProduct,
+    *,
+    recipe: CodingPreparationRecipe,
+    config: CodingPackConfig,
+) -> Path:
+    """Run, probe, and record one preparation; return the worktree node_modules.
 
-    params = Parameters.model_validate(ctx.parameters)
-    artifact = None
-    recipe: CodingPreparationRecipe | None = None
+    Mutates ``artifact`` (preparation evidence, cleared checks) without saving
+    it; a failure records a failed preparation before raising. Shared by this
+    tool and by verification, which prepares on demand.
+    """
+
     try:
-        config = get_coding_config(ctx)
-        recipe = config.preparation_recipe(params.recipe_id)
-        artifact = await load_owned_artifact(
-            ctx, artifact_id=params.artifact_id, config=config, claim=True
-        )
         worktree = artifact_worktree(artifact, config=config)
         await _require_ignored_paths(worktree, recipe=recipe, config=config)
         manifest_digest = dependency_manifest_digest(worktree, recipe=recipe)
@@ -294,31 +302,54 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             completed_at=datetime.now(UTC),
         )
         artifact.checks = {}
-        await ctx.code_change_artifact_store.save(artifact)
     except (CodingWorkflowError, OSError, ValueError, json.JSONDecodeError) as exc:
-        if artifact is not None and recipe is not None:
-            artifact.preparation = WorkProductPreparation(
-                status="failed",
-                recipe_id=recipe.id,
-                recipe_digest=preparation_recipe_digest(recipe),
-                probe_stderr=str(exc),
-                completed_at=datetime.now(UTC),
-            )
+        artifact.preparation = WorkProductPreparation(
+            status="failed",
+            recipe_id=recipe.id,
+            recipe_digest=preparation_recipe_digest(recipe),
+            probe_stderr=str(exc),
+            completed_at=datetime.now(UTC),
+        )
+        raise CodingWorkflowError(str(exc)) from exc
+    return node_modules
+
+
+async def execute(ctx: ToolExecutionContext) -> ToolResult:
+    """Run and verify one finite session-configured preparation recipe."""
+
+    params = Parameters.model_validate(ctx.parameters)
+    artifact = None
+    try:
+        config = get_coding_config(ctx)
+        recipe = config.preparation_recipe(params.recipe_id)
+        artifact = await load_owned_artifact(
+            ctx, artifact_id=params.artifact_id, config=config, claim=True
+        )
+        node_modules = await prepare_artifact(
+            ctx, artifact, recipe=recipe, config=config
+        )
+        await ctx.code_change_artifact_store.save(artifact)
+    except (CodingWorkflowError, OSError, ValueError) as exc:
+        if artifact is not None and artifact.preparation is not None and (
+            artifact.preparation.status == "failed"
+        ):
             await ctx.code_change_artifact_store.save(artifact)
         return ToolResult(tool_id=TOOL_ID, error=str(exc))
 
+    preparation = artifact.preparation
+    assert preparation is not None
     return ToolResult(
         tool_id=TOOL_ID,
         output_text=f"Prepared '{recipe.id}' in the owned worktree.",
         output_json={
             "artifact_id": artifact.artifact_id,
             "recipe_id": recipe.id,
-            "python_path": artifact.preparation.python_path,
+            "python_path": preparation.python_path,
             "node_modules": (
                 str(node_modules)
                 if recipe.node_packages and node_modules.is_dir()
                 else ""
             ),
-            "baseline_checks": sorted(artifact.preparation.baseline_checks),
+            "baseline_checks": sorted(preparation.baseline_checks),
         },
     )

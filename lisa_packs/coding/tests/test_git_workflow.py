@@ -67,7 +67,7 @@ from lisa_packs.coding.tools.prepare_workspace.prepare_workspace import (
 )
 from lisa_packs.coding.tools.push.push import execute as push
 from lisa_packs.coding.tools.read_file.read_file import execute as read_file
-from lisa_packs.coding.tools.run_check.run_check import execute as run_check
+from lisa_packs.coding.tools.verify.verify import execute as verify
 from lisa_packs.coding.tools.search_code.search_code import execute as search_code
 from lisa_packs.coding.tools.status.status import execute as status
 from lisa_packs.coding.workflow import (
@@ -299,8 +299,8 @@ async def test_import_full_lifecycle_and_push(tmp_path: Path) -> None:
     )
     assert "already imported" in duplicate.error
 
-    checked = await run_check(
-        _context(root, store, {"artifact_id": artifact_id, "check_id": "unit"})
+    checked = await verify(
+        _context(root, store, {"artifact_id": artifact_id, "check_ids": ["unit"]})
     )
     assert checked.output_json["status"] == "passed"
 
@@ -455,8 +455,8 @@ async def test_patch_invalidates_checks_and_status_tracks_owned_worktree(tmp_pat
     assert patched.error == ""
     assert patched.output_json["revision"] == 1
 
-    checked = await run_check(
-        _context(root, store, {"artifact_id": artifact_id, "check_id": "unit"})
+    checked = await verify(
+        _context(root, store, {"artifact_id": artifact_id, "check_ids": ["unit"]})
     )
     assert checked.output_json["status"] == "passed"
 
@@ -499,8 +499,8 @@ async def test_commit_stages_accumulated_task_paths_only(tmp_path: Path) -> None
     artifact = await store.get(artifact_id)
     assert artifact is not None
     assert artifact.changed_paths == ["app.txt", "other.txt"]
-    checked = await run_check(
-        _context(root, store, {"artifact_id": artifact_id, "check_id": "unit"})
+    checked = await verify(
+        _context(root, store, {"artifact_id": artifact_id, "check_ids": ["unit"]})
     )
     assert checked.output_json["status"] == "passed"
 
@@ -548,7 +548,7 @@ async def test_export_patches_series_applies_with_git_am_after_cleanup(tmp_path:
         await apply_patch(_context(root, store, {"artifact_id": artifact_id, "patch": patch}))
     ).error == ""
     assert (
-        await run_check(_context(root, store, {"artifact_id": artifact_id, "check_id": "unit"}))
+        await verify(_context(root, store, {"artifact_id": artifact_id, "check_ids": ["unit"]}))
     ).error == ""
     assert (
         await commit(
@@ -757,13 +757,13 @@ async def test_configured_check_ids_are_discoverable(tmp_path: Path) -> None:
     artifact_id = created.output_json["artifact_id"]
 
     inspected = await status(_context(root, store, {"artifact_id": artifact_id}))
-    unknown = await run_check(
-        _context(root, store, {"artifact_id": artifact_id, "check_id": "tests"})
+    unknown = await verify(
+        _context(root, store, {"artifact_id": artifact_id, "check_ids": ["tests"]})
     )
 
     assert inspected.output_json["configured_check_ids"] == ["unit"]
     assert inspected.output_json["required_check_ids"] == ["unit"]
-    assert "Configured checks: 'unit'." in unknown.error
+    assert "Configured checks: unit." in unknown.error
 
 
 _FORMAT_FIX = {"id": "format", "argv": ["gofmt", "-w", "."], "kind": "fix"}
@@ -793,16 +793,14 @@ async def test_fix_check_edits_become_a_new_revision_and_are_committed(tmp_path:
         _context(root, store, {"artifact_id": artifact_id, "patch": patch}, checks=checks)
     )
     assert patched.error == ""
-    unit = await run_check(
-        _context(root, store, {"artifact_id": artifact_id, "check_id": "unit"}, checks=checks)
-    )
-    assert unit.error == ""
 
-    fixed = await run_check(
+    # Fix checks run first in every verification; the uppercase rewrite is
+    # idempotent, so the fixer converges and the unit check sees no edits.
+    fixed = await verify(
         _context(
             root,
             store,
-            {"artifact_id": artifact_id, "check_id": "format"},
+            {"artifact_id": artifact_id},
             checks=checks,
             sandbox_effect=_reformat,
         )
@@ -811,16 +809,13 @@ async def test_fix_check_edits_become_a_new_revision_and_are_committed(tmp_path:
     assert fixed.error == ""
     assert fixed.output_json["fixed_paths"] == ["app.txt", "other.txt"]
     assert fixed.output_json["revision"] == 2
+    assert fixed.output_json["ready_to_commit"] is True
     artifact = await store.get(artifact_id)
     assert artifact is not None
     assert artifact.changed_paths == ["app.txt", "other.txt"]
-    assert set(artifact.checks) == {"format"}
+    assert set(artifact.checks) == {"format", "unit"}
     assert artifact.checks["format"].revision == 2
 
-    rerun = await run_check(
-        _context(root, store, {"artifact_id": artifact_id, "check_id": "unit"}, checks=checks)
-    )
-    assert rerun.error == ""
     committed = await commit(
         _context(
             root, store, {"artifact_id": artifact_id, "message": "Format"}, checks=checks
@@ -844,11 +839,11 @@ async def test_verify_check_edits_are_reverted_and_fail(tmp_path: Path) -> None:
     artifact_id = created.output_json["artifact_id"]
     worktree = Path(created.output_json["worktree_path"])
 
-    checked = await run_check(
+    checked = await verify(
         _context(
             root,
             store,
-            {"artifact_id": artifact_id, "check_id": "unit"},
+            {"artifact_id": artifact_id, "check_ids": ["unit"]},
             sandbox_effect=lambda path: (path / "app.txt").write_text("rewritten\n"),
         )
     )
@@ -870,11 +865,11 @@ async def test_failed_fix_check_reverts_its_edits(tmp_path: Path) -> None:
     artifact_id = created.output_json["artifact_id"]
     worktree = Path(created.output_json["worktree_path"])
 
-    fixed = await run_check(
+    fixed = await verify(
         _context(
             root,
             store,
-            {"artifact_id": artifact_id, "check_id": "format"},
+            {"artifact_id": artifact_id, "check_ids": ["format"]},
             checks=checks,
             sandbox_result=ToolResult(output_text="", output_json={"return_code": 2}),
             sandbox_effect=lambda path: (path / "app.txt").write_text("half-written\n"),
@@ -895,7 +890,7 @@ async def test_commit_accepts_long_multiline_message(tmp_path: Path) -> None:
     artifact_id = created.output_json["artifact_id"]
     patch = "--- a/app.txt\n+++ b/app.txt\n@@ -1 +1 @@\n-hello\n+hello world\n"
     await apply_patch(_context(root, store, {"artifact_id": artifact_id, "patch": patch}))
-    await run_check(_context(root, store, {"artifact_id": artifact_id, "check_id": "unit"}))
+    await verify(_context(root, store, {"artifact_id": artifact_id, "check_ids": ["unit"]}))
     message = "Change greeting\n\n" + "Explain the change in detail. " * 40
 
     committed = await commit(
@@ -925,9 +920,9 @@ async def test_advancing_tools_claim_the_artifact_for_the_current_task(tmp_path:
     assert artifact is not None
     assert artifact.task_id == "task-one"
 
-    checked = await run_check(
+    checked = await verify(
         _context(
-            root, store, {"artifact_id": artifact_id, "check_id": "unit"}, task_id="task-two"
+            root, store, {"artifact_id": artifact_id, "check_ids": ["unit"]}, task_id="task-two"
         )
     )
     assert checked.error == ""
@@ -937,8 +932,8 @@ async def test_advancing_tools_claim_the_artifact_for_the_current_task(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_configured_preparation_blocks_checks_until_current(tmp_path: Path) -> None:
-    """Preparation is enforced only when the session config opts into recipes."""
+async def test_verification_prepares_on_demand_and_blocks_on_failure(tmp_path: Path) -> None:
+    """A stale preparation is rerun by verification; failing it runs no check."""
 
     root = await _repository(tmp_path)
     store = MemoryWorkProductStore()
@@ -963,17 +958,22 @@ async def test_configured_preparation_blocks_checks_until_current(tmp_path: Path
     )
     artifact_id = created.output_json["artifact_id"]
 
-    blocked = await run_check(
+    blocked = await verify(
         _context(
             root,
             store,
-            {"artifact_id": artifact_id, "check_id": "unit"},
+            {"artifact_id": artifact_id, "check_ids": ["unit"]},
             checks=checks,
             preparation_recipes=recipes,
         )
     )
 
-    assert "Workspace preparation is missing or stale" in blocked.error
+    assert ".venv must be ignored" in blocked.error
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    assert artifact.preparation is not None
+    assert artifact.preparation.status == "failed"
+    assert artifact.checks == {}
 
 
 def test_manifest_digest_streams_locks_larger_than_the_read_cap(tmp_path: Path) -> None:
@@ -1321,11 +1321,11 @@ async def test_failed_check_surfaces_the_real_output_tail(tmp_path: Path) -> Non
     )
     artifact_id = created.output_json["artifact_id"]
 
-    failed = await run_check(
+    failed = await verify(
         _context(
             root,
             store,
-            {"artifact_id": artifact_id, "check_id": "unit"},
+            {"artifact_id": artifact_id, "check_ids": ["unit"]},
             checks=checks,
             required_check_ids=[],
             sandbox_result=ToolResult(output_text="boom-detail", output_json={"return_code": 2}),
@@ -1337,7 +1337,7 @@ async def test_failed_check_surfaces_the_real_output_tail(tmp_path: Path) -> Non
     # The cause is now in the tool result the model sees, not only on the
     # persisted artifact record.
     assert "boom-detail" in failed.output_text
-    assert "Failure output:" in failed.output_text
+    assert "unit output:" in failed.output_text
     stored = await store.get(artifact_id)
     assert stored is not None and "boom-detail" in stored.checks["unit"].stdout
 
@@ -1351,8 +1351,8 @@ async def test_passing_check_carries_no_failure_excerpt(tmp_path: Path) -> None:
     created = await create_worktree(_context(root, store, {"summary": "passing"}))
     artifact_id = created.output_json["artifact_id"]
 
-    passed = await run_check(
-        _context(root, store, {"artifact_id": artifact_id, "check_id": "unit"})
+    passed = await verify(
+        _context(root, store, {"artifact_id": artifact_id, "check_ids": ["unit"]})
     )
 
     assert passed.error == ""
@@ -2283,11 +2283,11 @@ async def test_status_exposes_current_diff_and_check_diagnostics(tmp_path: Path)
         )
     )
     assert patched.error == ""
-    failed = await run_check(
+    failed = await verify(
         _context(
             root,
             store,
-            {"artifact_id": artifact_id, "check_id": "failure"},
+            {"artifact_id": artifact_id, "check_ids": ["failure"]},
             checks=failing_checks,
             required_check_ids=[],
             sandbox_result=ToolResult(
@@ -2308,14 +2308,14 @@ async def test_status_exposes_current_diff_and_check_diagnostics(tmp_path: Path)
         )
     )
 
-    assert "+hello with evidence" in inspected.output_json["git_diff"]
+    assert "app.txt" in inspected.output_json["git_diff_stat"]
+    assert "git_diff" not in inspected.output_json
     diagnostic = inspected.output_json["checks"]["failure"]
     assert diagnostic["status"] == "failed"
-    assert diagnostic["argv"] == failing_checks[0]["argv"]
     assert diagnostic["duration_ms"] >= 0
     assert diagnostic["completed_at"] is not None
-    assert diagnostic["stdout"].strip() == "stdout evidence"
-    assert diagnostic["stderr"].strip() == "stderr evidence"
+    assert "stdout evidence" in diagnostic["failure_excerpt"]
+    assert "stderr evidence" in diagnostic["failure_excerpt"]
 
 
 @pytest.mark.asyncio
@@ -2355,8 +2355,8 @@ index 0000000..3e75765
 
 
 @pytest.mark.asyncio
-async def test_stale_checks_block_commit_and_dirty_worktree_cleanup(tmp_path: Path) -> None:
-    """A later patch invalidates checks and prevents both commit and cleanup."""
+async def test_commit_reverifies_stale_checks_and_blocks_dirty_cleanup(tmp_path: Path) -> None:
+    """A later patch invalidates checks; commit reruns them and refuses on failure."""
 
     root = await _repository(tmp_path)
     store = MemoryWorkProductStore()
@@ -2379,8 +2379,8 @@ async def test_stale_checks_block_commit_and_dirty_worktree_cleanup(tmp_path: Pa
     first_applied = await apply_patch(
         _context(root, store, {"artifact_id": artifact_id, "patch": first_patch})
     )
-    checked = await run_check(
-        _context(root, store, {"artifact_id": artifact_id, "check_id": "unit"})
+    checked = await verify(
+        _context(root, store, {"artifact_id": artifact_id, "check_ids": ["unit"]})
     )
     second_applied = await apply_patch(
         _context(root, store, {"artifact_id": artifact_id, "patch": second_patch})
@@ -2390,9 +2390,21 @@ async def test_stale_checks_block_commit_and_dirty_worktree_cleanup(tmp_path: Pa
     assert second_applied.error == ""
 
     committed = await commit(
-        _context(root, store, {"artifact_id": artifact_id, "message": "stale checks"})
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id, "message": "stale checks"},
+            sandbox_result=ToolResult(
+                output_text="second revision fails\n", output_json={"return_code": 1}
+            ),
+        )
     )
-    assert "Every required check must pass" in committed.error
+    assert "Not committed: the required checks did not all pass" in committed.error
+    assert "second revision fails" in committed.error
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    assert artifact.checks["unit"].revision == 2
+    assert artifact.checks["unit"].status == "failed"
 
     cleaned = await cleanup_worktree(_context(root, store, {"artifact_id": artifact_id}))
     assert "git worktree remove failed" in cleaned.error
@@ -2449,7 +2461,7 @@ async def test_live_bwrap_check_certifies_only_the_owned_worktree(tmp_path: Path
     )
     assert patched.result.error == ""
     checked = await run_tool(
-        catalog, "coding_run_check", factory, {"artifact_id": artifact_id, "check_id": "smoke"}
+        catalog, "coding_verify", factory, {"artifact_id": artifact_id, "check_ids": ["smoke"]}
     )
     if "bubblewrap sandbox is not available" in checked.result.error:
         pytest.skip(checked.result.error)
@@ -2610,8 +2622,8 @@ async def _commit_artifact(
             _context(root, store, {"artifact_id": artifact_id, "patch": patch})
         )
         assert applied.error == "", applied.error
-    checked = await run_check(
-        _context(root, store, {"artifact_id": artifact_id, "check_id": "unit"})
+    checked = await verify(
+        _context(root, store, {"artifact_id": artifact_id, "check_ids": ["unit"]})
     )
     assert checked.output_json["status"] == "passed"
     committed = await commit(
@@ -3184,7 +3196,7 @@ async def test_status_surfaces_source_tip_drift_and_rebase_prompt(
     assert drifted.output_json["source_head_sha"] != drifted.output_json["base_sha"]
     assert drifted.output_json["source_ahead_of_base"] is True
     assert f"{tip}" in drifted.output_text
-    assert "op=rebase" in drifted.output_text
+    assert "rebases onto" in drifted.output_text
 
     # The prompted rebase closes the drift with the surfaced tip directly.
     rebased = await history(
@@ -3461,12 +3473,10 @@ async def test_history_preserves_import_pending_state_and_requires_checks_after_
     artifact = await store.get(artifact_id)
     assert artifact.revision == rebased.output_json["revision"]
     assert artifact.checks == {}
-    # commit/push gate re-verification of the new revision content.
-    blocked_commit = await commit(
-        _context(root, store, {"artifact_id": artifact_id, "message": "again"})
-    )
-    # commit needs changed paths and current checks; history rewrote the commit
-    # so there is nothing to re-commit — the gate reports the missing checks.
-    assert blocked_commit.error != ""
+    # The push gate requires re-verification of the new revision content.
+    blocked = await push(_context(root, store, {"artifact_id": artifact_id}))
+    assert "Every required check must pass" in blocked.error
+    verified = await verify(_context(root, store, {"artifact_id": artifact_id}))
+    assert verified.output_json["ready_to_commit"] is True
     pushed = await push(_context(root, store, {"artifact_id": artifact_id}))
-    assert "Every required check must pass" in pushed.error
+    assert pushed.error == "", pushed.error

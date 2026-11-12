@@ -36,7 +36,7 @@ EXPECTED_TOOLS = {
     "coding_read_copilot_customizations",
     "coding_read_file",
     "coding_prepare_workspace",
-    "coding_run_check",
+    "coding_verify",
     "coding_search_code",
     "coding_status",
 }

@@ -1,11 +1,19 @@
-"""Commit an owned worktree only after current required checks pass."""
+"""Commit an owned worktree after verifying it against the upstream tip.
+
+Committing always runs the verification pipeline first (upstream sync,
+preparation, fix checks, required checks with reuse), so a commit is never
+certified against a stale base or a stale toolchain.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 from kernel.models import ToolExecutionContext, ToolResult
+from pydantic import BaseModel, Field
+
 from lisa_packs.coding.config import CodingPackConfig, get_coding_config
+from lisa_packs.coding.verification import VerifyReport, verify_artifact
 from lisa_packs.coding.workflow import (
     CodingWorkflowError,
     artifact_branch_is_allowed,
@@ -13,10 +21,8 @@ from lisa_packs.coding.workflow import (
     artifact_worktree,
     candidate_tree_sha,
     load_owned_artifact,
-    preparation_is_current,
     run_git,
 )
-from pydantic import BaseModel, Field
 
 TOOL_ID = "coding_commit"
 
@@ -36,6 +42,12 @@ async def _verify_committed_tree(
         raise CodingWorkflowError("Committed tree differs from the checked candidate tree.")
 
 
+def _committed_text(revision: int, commit_sha: str, report: VerifyReport) -> str:
+    return f"Committed revision {revision} as {commit_sha}. " + report.text(
+        revision=revision
+    )
+
+
 async def execute(ctx: ToolExecutionContext) -> ToolResult:
     """Stage explicit changed paths and commit only a current checked revision."""
 
@@ -51,17 +63,15 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         if not artifact_branch_is_allowed(artifact, config):
             raise CodingWorkflowError("Artifact branch is not an owned unprotected feature branch.")
         worktree = artifact_worktree(artifact, config=config)
-        if not preparation_is_current(artifact, worktree=worktree, config=config):
-            raise CodingWorkflowError(
-                "Workspace preparation is missing or stale; run coding_prepare_workspace first."
-            )
-        paths = list(dict.fromkeys(artifact.changed_paths))
-        if not paths:
+        if not artifact.changed_paths:
             raise CodingWorkflowError("Artifact has no task-owned changed paths to commit.")
+        report = await verify_artifact(ctx, artifact, config=config)
+        paths = list(dict.fromkeys(artifact.changed_paths))
         candidate_tree = await candidate_tree_sha(worktree, config=config, paths=paths)
         if not artifact_has_current_required_checks(artifact, candidate_tree=candidate_tree):
             raise CodingWorkflowError(
-                "Every required check must pass at the current artifact revision and checked tree."
+                "Not committed: the required checks did not all pass.\n"
+                + report.text(revision=artifact.revision)
             )
         current_branch = await run_git(worktree, ("branch", "--show-current"), config=config)
         if current_branch.return_code != 0 or current_branch.stdout.strip() != artifact.branch:
@@ -93,8 +103,9 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
 
     return ToolResult(
         tool_id=TOOL_ID,
-        output_text=f"Committed revision {artifact.revision} as {artifact.commit_sha}.",
+        output_text=_committed_text(artifact.revision, artifact.commit_sha, report),
         output_json={
+            "verification": report.to_json(artifact=artifact),
             "artifact_id": artifact.artifact_id,
             "commit_sha": artifact.commit_sha,
             "branch": artifact.branch,

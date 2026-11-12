@@ -6,10 +6,12 @@ import re
 from uuid import uuid4
 
 from kernel.models import ToolExecutionContext, ToolResult
-from lisa_packs.coding.config import get_coding_config
-from lisa_packs.coding.workflow import CodingWorkflowError, run_git
 from pydantic import BaseModel, Field
 from sdk.workproducts import WorkProduct
+
+from lisa_packs.coding.config import get_coding_config
+from lisa_packs.coding.freshness import resolve_upstream_tip
+from lisa_packs.coding.workflow import CodingWorkflowError, run_git
 
 TOOL_ID = "coding_create_worktree"
 
@@ -64,12 +66,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         store = ctx.code_change_artifact_store
         if store is None:
             raise CodingWorkflowError("No code change artifact store is available.")
-        base = await run_git(source_root, ("rev-parse", "HEAD"), config=config)
-        if base.return_code != 0:
-            raise CodingWorkflowError(
-                base.stderr.strip() or "Cannot resolve the source HEAD."
-            )
-        base = base.stdout.strip()
+        base = await resolve_upstream_tip(source_root, config=config)
         import_commit = ""
         if params.import_commit:
             exists = await run_git(

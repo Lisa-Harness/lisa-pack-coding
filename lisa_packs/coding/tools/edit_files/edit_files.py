@@ -22,6 +22,7 @@ from pydantic import (
 )
 
 from lisa_packs.coding.config import CodingPackConfig, get_coding_config
+from lisa_packs.coding.freshness import SyncOutcome, sync_and_save, with_sync_note
 from lisa_packs.coding.local_files import (
     CodingPathError,
     read_utf8_file_snapshot,
@@ -655,6 +656,7 @@ async def preflight(ctx: ToolExecutionContext) -> ToolResult | None:
 async def execute(ctx: ToolExecutionContext) -> ToolResult:
     """Validate and apply all structured edits as one owned-worktree revision."""
 
+    sync: SyncOutcome | None = None
     try:
         params = _validated_parameters(ctx)
         config = get_coding_config(ctx)
@@ -662,6 +664,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             ctx, artifact_id=params.artifact_id, config=config, claim=True
         )
         worktree = artifact_worktree(artifact, config=config)
+        sync = await sync_and_save(ctx, artifact, worktree=worktree, config=config)
         changed, patch = await _checked_patch(params, worktree=worktree, config=config)
         applied = await run_git(
             worktree,
@@ -679,12 +682,13 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         artifact.status = "patched"
         await ctx.code_change_artifact_store.save(artifact)
     except (CodingPathError, CodingWorkflowError, OSError, ValueError) as exc:
-        return ToolResult(tool_id=TOOL_ID, error=str(exc))
+        return ToolResult(tool_id=TOOL_ID, error=with_sync_note(str(exc), sync))
 
     return ToolResult(
         tool_id=TOOL_ID,
-        output_text=(
-            f"Applied structured edits to {len(changed)} paths at revision {artifact.revision}."
+        output_text=with_sync_note(
+            f"Applied structured edits to {len(changed)} paths at revision {artifact.revision}.",
+            sync,
         ),
         output_json={
             "artifact_id": artifact.artifact_id,

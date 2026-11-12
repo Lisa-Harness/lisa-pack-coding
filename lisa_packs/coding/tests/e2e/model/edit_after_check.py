@@ -63,8 +63,8 @@ def respond(turn: ScriptTurn) -> Reply:
     edits = turn.count("coding_edit_files")
     if turn.count("coding_status") == 0:
         return Reply.call("coding_status", artifact_id=artifact_id)
-    if turn.count("coding_run_check") == 0:
-        return Reply.call("coding_run_check", artifact_id=artifact_id, check_id="test")
+    if turn.count("coding_verify") == 0:
+        return Reply.call("coding_verify", artifact_id=artifact_id)
     if reads == 0:
         return Reply.call("coding_read_file", artifact_id=artifact_id, path="stats.py")
     if edits == 0:
@@ -77,8 +77,8 @@ def respond(turn: ScriptTurn) -> Reply:
         if not sha:
             raise ScriptError(f"no content_sha256 in read result: {read}")
         return _edit(artifact_id, str(sha))
-    if turn.count("coding_run_check") == 1:
-        return Reply.call("coding_run_check", artifact_id=artifact_id, check_id="test")
+    if turn.count("coding_verify") == 1:
+        return Reply.call("coding_verify", artifact_id=artifact_id)
     if turn.count("coding_commit") == 0:
         return Reply.call(
             "coding_commit", artifact_id=artifact_id, message="Fix stats.mean divisor"

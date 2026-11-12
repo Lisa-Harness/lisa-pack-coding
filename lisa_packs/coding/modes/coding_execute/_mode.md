@@ -48,7 +48,7 @@ allowed_tool_ids:
   - coding_apply_patch
   - coding_import_commits
   - coding_prepare_workspace
-  - coding_run_check
+  - coding_verify
   - coding_status
   - coding_commit
   - coding_history
@@ -82,27 +82,17 @@ including whether it ends with a newline.
 Capture relevant learnings to aid in future changes.
 Use `coding_apply_patch` to apply existing unified diff files,
 but not as the default way to author text changes.
-Run `coding_run_check` to validate your changes.
-After each round of edits, run the session's fix checks first (formatters
-and autofixers, listed as `fix_check_ids` by `coding_status`) and then the
-verify checks: fix-check edits change the tree, so a verify result recorded
-before them is stale — rerun the verify checks whenever a fix check reports
-new edits. Mechanical lint and formatting violations are the fix checks'
-job; hand-edit only what they leave behind.
-Before the first check on a worktree, run `coding_prepare_workspace` with the
-artifact id: `coding_run_check` refuses to run until the workspace preparation
-is current, and preparing once gives every later check the same worktree-owned
-toolchain. The session configures exactly which preparation command runs
-(and which extras it installs) — do not guess recipe ids; list them with
-`coding_status` and use the configured one.
-`coding_status` also reports `configured_preparation_recipe_ids`; the recipe
-may be Python (`uv sync`, `project_modules` probing the worktree `.venv`) or
-Node (`pnpm install`, `node_packages` probing the worktree `node_modules`).
-Do not assume either toolchain: a pnpm project has no `.venv`, so a bare
-`python` in a check runs whatever the sandbox image provides. Run checks
-through the session's configured vector, and re-prepare after you edit a
-declared dependency manifest (`uv.lock`, `pnpm-lock.yaml`, …) — that edit
-makes the recorded preparation stale.
+The harness owns verification. `coding_commit` syncs the worktree onto the
+upstream tip, prepares the toolchain when its recipe or dependency manifests
+went stale, runs the fix checks (formatters, autofixers) to a fixed point,
+then runs the required checks, reusing passes whose inputs did not change; it
+commits only when they all pass and otherwise returns the failing output. So
+the loop is: edit, then `coding_commit`. Call `coding_verify` first only when
+you want check feedback without committing; it runs the same pipeline (pass
+`check_ids` for checks beyond the required set). Mechanical lint and
+formatting are the fix checks' job; hand-edit only what they leave behind.
+Run `coding_prepare_workspace` yourself only when `coding_status` lists more
+than one preparation recipe and none is recorded yet.
 Do not export patches or push changes unless explicitly requested.
 
 ## Choosing and organizing worktrees
@@ -133,18 +123,12 @@ with all configured required checks passing on the committed content. Report
 missing approvals, failed checks, or a blocked commit instead of claiming
 completion.
 
-## Rebase onto the source tip early
+## Staying current with upstream
 
-The worktree branches at the source `HEAD` frozen at creation time; the source
-checkout keeps moving (new commits land on the default branch). Treat rebasing
-as routine maintenance, not a last resort: `coding_status` reports the source
-checkout's current tip (`source_head_sha`) beside the artifact's base
-(`base_sha`), and when the source tip has moved past the base it says so
-outright. As soon as you see that drift — ideally before your next edit, and
-always before a final commit — run `coding_history` with
-`op=rebase, target=<source_head_sha>` (the target also accepts a branch name).
-Rebasing late stacks up drift and latent merge conflicts; rebasing after every
-few source commits keeps the owned branch a small, clean delta that merges
-without surprises. A conflicting rebase aborts on its own and leaves the
-branch and checkpoint exactly where they were, so an early rebase failure
-costs nothing.
+Every edit, verification, and commit first rebases the owned branch (and any
+uncommitted task edits) onto the upstream tip, so work never lands on a stale
+base. When upstream touched a file you changed, the tool result says so:
+reread that file before the next edit. A conflicting rebase is aborted and
+reported with the conflicting paths, leaving the branch where it was; report
+it rather than working around it. `coding_history` (`op=rebase`) remains for
+deliberately moving onto a different base.

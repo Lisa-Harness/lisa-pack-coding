@@ -1,6 +1,6 @@
 """Worktree-trajectory eval: the full coding pack write chain, in-process.
 
-Drives ``create_worktree → status → read_file → apply_patch → run_check →
+Drives ``create_worktree → status → read_file → apply_patch → verify →
 commit → push → status → cleanup_worktree`` against a throwaway Git repo and
 bare remote. Asserts the artifact state machine transitions
 (``created → patched → committed → pushed → cleaned``) and per-tool result
@@ -205,8 +205,8 @@ async def test_real_go_worktree_repair_trajectory(
         catalog,
         factory,
         trajectory,
-        "coding_run_check",
-        {"artifact_id": artifact_id, "check_id": "go-test"},
+        "coding_verify",
+        {"artifact_id": artifact_id, "check_ids": ["go-test"]},
     )
     assert baseline.result.error == "", baseline.result.error
     assert baseline.result.output_json["status"] == "passed"
@@ -247,8 +247,8 @@ async def test_real_go_worktree_repair_trajectory(
         catalog,
         factory,
         trajectory,
-        "coding_run_check",
-        {"artifact_id": artifact_id, "check_id": "go-test"},
+        "coding_verify",
+        {"artifact_id": artifact_id, "check_ids": ["go-test"]},
     )
     assert failed.result.error == "", failed.result.error
     assert failed.result.output_json["status"] == "failed"
@@ -262,7 +262,7 @@ async def test_real_go_worktree_repair_trajectory(
             "message": "must not commit failing code",
         },
     )
-    assert "Every required check must pass" in blocked.result.error
+    assert "Not committed: the required checks did not all pass" in blocked.result.error
     evidence = await _step(
         catalog, factory, trajectory, "coding_status", {"artifact_id": artifact_id}
     )
@@ -296,8 +296,8 @@ async def test_real_go_worktree_repair_trajectory(
         catalog,
         factory,
         trajectory,
-        "coding_run_check",
-        {"artifact_id": artifact_id, "check_id": "go-test"},
+        "coding_verify",
+        {"artifact_id": artifact_id, "check_ids": ["go-test"]},
     )
     assert passed.result.error == "", passed.result.error
     assert passed.result.output_json["status"] == "passed"
@@ -477,14 +477,6 @@ async def test_real_python_preparation_and_repair_trajectory(
     assert created.result.error == "", created.result.error
     artifact_id = str(created.result.output_json["artifact_id"])
     worktree = Path(str(created.result.output_json["worktree_path"]))
-    unprepared = await _step(
-        catalog,
-        factory,
-        trajectory,
-        "coding_run_check",
-        {"artifact_id": artifact_id, "check_id": "unit"},
-    )
-    assert "Workspace preparation is missing or stale" in unprepared.result.error
     prepared = await _step(
         catalog, factory, trajectory, "coding_prepare_workspace", {"artifact_id": artifact_id}
     )
@@ -531,8 +523,8 @@ async def test_real_python_preparation_and_repair_trajectory(
         catalog,
         factory,
         trajectory,
-        "coding_run_check",
-        {"artifact_id": artifact_id, "check_id": "unit"},
+        "coding_verify",
+        {"artifact_id": artifact_id, "check_ids": ["unit"]},
     )
     assert failed.result.error == "", failed.result.error
     assert failed.result.output_json["status"] == "failed"
@@ -543,7 +535,7 @@ async def test_real_python_preparation_and_repair_trajectory(
         "coding_commit",
         {"artifact_id": artifact_id, "message": "must not commit failing Python"},
     )
-    assert "Every required check must pass" in blocked.result.error
+    assert "Not committed: the required checks did not all pass" in blocked.result.error
     fresh = await _step(catalog, factory, trajectory, "coding_read_file", {"path": "app.py"})
     assert fresh.result.error == "", fresh.result.error
     repaired = await _step(
@@ -570,8 +562,8 @@ async def test_real_python_preparation_and_repair_trajectory(
         catalog,
         factory,
         trajectory,
-        "coding_run_check",
-        {"artifact_id": artifact_id, "check_id": "unit"},
+        "coding_verify",
+        {"artifact_id": artifact_id, "check_ids": ["unit"]},
     )
     assert checked.result.error == "", checked.result.error
     assert checked.result.output_json["status"] == "passed"
@@ -591,7 +583,6 @@ async def test_real_python_preparation_and_repair_trajectory(
     assert not worktree.exists()
     assert await _source_snapshot(factory) == source_snapshot
     assert [entry["result_error"] for entry in trajectory.entries if entry["result_error"]] == [
-        unprepared.result.error,
         blocked.result.error,
     ]
     write_trajectory(trajectory, tmp_path / "trajectory-python-preparation-repair.json")
@@ -796,14 +787,6 @@ async def test_real_pnpm_typescript_preparation(
     artifact_id = str(created.result.output_json["artifact_id"])
     worktree = Path(str(created.result.output_json["worktree_path"]))
 
-    unprepared = await _step(
-        catalog,
-        factory,
-        trajectory,
-        "coding_run_check",
-        {"artifact_id": artifact_id, "check_id": "unit"},
-    )
-    assert "Workspace preparation is missing or stale" in unprepared.result.error
 
     prepared = await _step(
         catalog, factory, trajectory, "coding_prepare_workspace", {"artifact_id": artifact_id}
@@ -880,14 +863,14 @@ async def test_real_pnpm_typescript_preparation(
         catalog,
         factory,
         trajectory,
-        "coding_run_check",
-        {"artifact_id": artifact_id, "check_id": "unit"},
+        "coding_verify",
+        {"artifact_id": artifact_id, "check_ids": ["unit"]},
     )
     assert failing.result.error == "", failing.result.error
     assert failing.result.output_json["status"] == "passed"
 
-    # A lockfile edit makes the recorded preparation stale: the gate must
-    # notice before the next check runs.
+    # A lockfile edit makes the recorded preparation stale: verification must
+    # re-prepare before the next check runs.
     lockfile = await _step(
         catalog, factory, trajectory, "coding_read_file", {"path": "pnpm-lock.yaml"}
     )
@@ -915,26 +898,15 @@ async def test_real_pnpm_typescript_preparation(
         },
     )
     assert bumped.result.error == "", bumped.result.error
-    stale = await _step(
-        catalog,
-        factory,
-        trajectory,
-        "coding_run_check",
-        {"artifact_id": artifact_id, "check_id": "unit"},
-    )
-    assert "Workspace preparation is missing or stale" in stale.result.error
-    reprepared = await _step(
-        catalog, factory, trajectory, "coding_prepare_workspace", {"artifact_id": artifact_id}
-    )
-    assert reprepared.result.error == "", reprepared.result.error
     rechecked = await _step(
         catalog,
         factory,
         trajectory,
-        "coding_run_check",
-        {"artifact_id": artifact_id, "check_id": "unit"},
+        "coding_verify",
+        {"artifact_id": artifact_id, "check_ids": ["unit"]},
     )
     assert rechecked.result.error == "", rechecked.result.error
+    assert rechecked.result.output_json["prepared"] is True
     assert rechecked.result.output_json["status"] == "passed"
 
     committed = await _step(
@@ -1130,10 +1102,10 @@ async def test_dnsmasq_web_hygiene_workflow(
         catalog,
         factory,
         trajectory,
-        "coding_run_check",
+        "coding_verify",
         {
             "artifact_id": artifact_id,
-            "check_id": "go-test",
+            "check_ids": ["go-test"],
         },
     )
     assert baseline.result.error == "", baseline.result.error
@@ -1246,10 +1218,10 @@ async def test_dnsmasq_web_hygiene_workflow(
             catalog,
             factory,
             trajectory,
-            "coding_run_check",
+            "coding_verify",
             {
                 "artifact_id": artifact_id,
-                "check_id": check_id,
+                "check_ids": [check_id],
             },
         )
         assert checked.result.error == "", checked.result.error
@@ -1366,8 +1338,8 @@ async def test_full_worktree_trajectory(
         catalog,
         factory,
         trajectory,
-        "coding_run_check",
-        {"artifact_id": artifact_id, "check_id": "smoke"},
+        "coding_verify",
+        {"artifact_id": artifact_id, "check_ids": ["smoke"]},
     )
     assert run.result.error == ""
     assert run.result.output_json["status"] == "passed"
@@ -1399,7 +1371,7 @@ async def test_full_worktree_trajectory(
         "coding_status",
         "coding_read_file",
         "coding_apply_patch",
-        "coding_run_check",
+        "coding_verify",
         "coding_commit",
         "coding_push",
         "coding_status",
@@ -1408,7 +1380,7 @@ async def test_full_worktree_trajectory(
 
 @pytest.mark.eval
 @pytest.mark.asyncio
-async def test_required_check_rejects_changed_candidate_tree(
+async def test_commit_reverifies_a_changed_candidate_tree(
     tmp_path: Path,
     catalog: dict[str, dict[str, object]],
 ) -> None:
@@ -1427,7 +1399,7 @@ async def test_required_check_rejects_changed_candidate_tree(
     )
     assert patched.result.error == ""
     checked = await run_tool(
-        catalog, "coding_run_check", factory, {"artifact_id": artifact_id, "check_id": "smoke"}
+        catalog, "coding_verify", factory, {"artifact_id": artifact_id, "check_ids": ["smoke"]}
     )
     assert checked.result.output_json["status"] == "passed"
 
@@ -1438,9 +1410,11 @@ async def test_required_check_rejects_changed_candidate_tree(
         factory,
         {"artifact_id": artifact_id, "message": "unchecked file"},
     )
-    assert "checked tree" in committed.result.error.lower()
+    assert committed.result.error == "", committed.result.error
+    verification = committed.result.output_json["verification"]
+    assert [item["reused"] for item in verification["checks"]] == [False]
     artifact = await factory.artifact_store.get(artifact_id)
-    assert artifact is not None and artifact.commit_sha == ""
+    assert artifact is not None and artifact.commit_sha != ""
 
 
 @pytest.mark.eval
@@ -1558,9 +1532,9 @@ async def test_required_check_refuses_missing_sandbox(
 
     checked = await run_tool(
         catalog,
-        "coding_run_check",
+        "coding_verify",
         factory,
-        {"artifact_id": artifact_id, "check_id": "smoke"},
+        {"artifact_id": artifact_id, "check_ids": ["smoke"]},
     )
 
     assert "sandbox" in checked.result.error.lower()
@@ -1602,7 +1576,7 @@ async def test_required_check_rejects_restricted_worktree_floor(
 
     factory.delegated_tool_dispatch = forbidden_dispatch
     checked = await run_tool(
-        catalog, "coding_run_check", factory, {"artifact_id": artifact_id, "check_id": "smoke"}
+        catalog, "coding_verify", factory, {"artifact_id": artifact_id, "check_ids": ["smoke"]}
     )
     assert "floor" in checked.result.error.lower()
     artifact = await factory.artifact_store.get(artifact_id)
@@ -1639,7 +1613,7 @@ async def test_check_rejects_worktree_mutation_during_sandbox_run(
 
     factory.delegated_tool_dispatch = mutating_dispatch
     checked = await run_tool(
-        catalog, "coding_run_check", factory, {"artifact_id": artifact_id, "check_id": "smoke"}
+        catalog, "coding_verify", factory, {"artifact_id": artifact_id, "check_ids": ["smoke"]}
     )
     assert "modified app.txt; the edits were reverted" in checked.result.error
     data_root = factory.data_dir or factory.root / ".packstest-data"
@@ -1675,9 +1649,10 @@ async def test_timed_out_check_cannot_certify_commit(
 
     factory.delegated_tool_dispatch = timed_out_dispatch
     checked = await run_tool(
-        catalog, "coding_run_check", factory, {"artifact_id": artifact_id, "check_id": "smoke"}
+        catalog, "coding_verify", factory, {"artifact_id": artifact_id, "check_ids": ["smoke"]}
     )
-    assert checked.result.output_json["status"] == "timed_out"
+    assert checked.result.output_json["status"] == "failed"
+    assert [item["status"] for item in checked.result.output_json["checks"]] == ["timed_out"]
     artifact = await factory.artifact_store.get(artifact_id)
     assert artifact is not None and artifact.checks["smoke"].status == "timed_out"
     committed = await run_tool(
@@ -1768,9 +1743,9 @@ async def test_required_check_rejects_unverified_sandbox_result(
 
     checked = await run_tool(
         catalog,
-        "coding_run_check",
+        "coding_verify",
         factory,
-        {"artifact_id": artifact_id, "check_id": "smoke"},
+        {"artifact_id": artifact_id, "check_ids": ["smoke"]},
     )
 
     assert "sandbox" in checked.result.error.lower()

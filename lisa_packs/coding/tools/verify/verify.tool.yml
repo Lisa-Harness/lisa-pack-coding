@@ -1,0 +1,12 @@
+tool_id: coding_verify
+pack_id: lisa-pack-coding
+description: "Verify an owned coding worktree in one call: sync it onto the upstream tip, prepare its toolchain when stale, run the fix checks to a fixed point, then the verify checks (skipping checks whose needs failed and reusing passes whose inputs are unchanged). Omit check_ids for every fix and required check. Reports one line per check plus failure excerpts."
+exportable: true
+effect: write
+approval_required: true
+approval_preview: "sync, prepare, and run the configured checks in the owned worktree"
+# Each check bounds itself with its own timeout_seconds (up to 1800) and a
+# verification runs several in sequence, so the wrapper self-bounds
+# (sdk/AUTHORING.md). A fixed wrapper bound can never be sized to every
+# session's check list.
+timeout_seconds: 0

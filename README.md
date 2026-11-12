@@ -49,14 +49,14 @@ target the source workspace or an owned worktree.
 | `coding_edit_files` | write | ✓ | Preferred editor: apply exact, hash-guarded replacements, creates, or deletes as one revision. Replacements match the original snapshot and must not overlap. The tool generates and prevalidates the Git patch, preserving supplied content and EOF newlines. |
 | `coding_apply_patch` | write | ✓ | Fallback for existing unified diffs: prevalidate (`git apply --check`) and apply a bounded patch. Bumps `revision`, records `changed_paths`, **clears `checks`** (stale results are invalidated). |
 | `coding_import_commits` | write | ✓ | Replay one already-merged upstream commit onto the owned worktree: the worktree must be created with `import_commit` (base = that commit's parent), the commit's diff applies as one patch revision, and `checks` are cleared. Rejects re-import before a commit/export, base drift, and empty commits. |
-| `coding_prepare_workspace` | write | ✓ | Run the session-configured preparation command (an argument vector in `preparation_recipes`, exactly like a check's `argv`) in the owned sandbox, certify the prepared Python interpreter and/or Node packages, and record preparation evidence. Checks refuse to run until preparation is current. |
-| `coding_run_check` | write | ✓ | Run one named check through the bwrap owner's direct-write sandbox floor. Result records the current revision and candidate-tree hash; no host fallback. A `verify` check that rewrites files fails and its edits are reverted; a `fix` check's edits become a new revision (like a patch) and stale the other checks. |
-| `coding_commit` | write | ✓ | Stage commit candidates and commit only after required checks passed for this revision and tree, on the owned unprotected branch. The message may be any length and span multiple lines. Committing clears pending `imported_commits` state (the imported content is carried by the commit). |
-| `coding_history` | write | ✓ | Slice and dice the owned branch's committed history: `tag`/`tag_delete` (owned commits only), `restore` (rewind to any existing tag's commit, including `<branch_prefix>ckpt/` checkpoints), `reword`, `squash` (fold owned commits into one; `target` keeps everything at or below it as a parent), or `rebase` (`--onto` a new base given as any Git revision — SHA or branch name — auto-abort on conflict; use it as soon as the source tip moves past the artifact base). Every rewrite first tags a checkpoint; a rewrite that leaves the tree byte-identical keeps recorded checks, any content change clears them. Refuses rewrites of already-pushed commits; protected branches and the source checkout are untouchable. |
+| `coding_prepare_workspace` | write | ✓ | Run the session-configured preparation command (an argument vector in `preparation_recipes`, exactly like a check's `argv`) in the owned sandbox, certify the prepared Python interpreter and/or Node packages, and record preparation evidence. Verification prepares on demand, so call it directly only to pick among several recipes. |
+| `coding_verify` | write | ✓ | One-call verification: sync onto the upstream tip, prepare when stale, run the fix checks to a fixed point (at most 3 passes), then the verify checks in config order — skipping a check whose `needs` failed and reusing a pass whose `inputs` are unchanged. Every check runs through the bwrap owner's direct-write sandbox floor (no host fallback) and records the current revision and candidate-tree hash. A `verify` check that rewrites files fails and its edits are reverted. Reports one line per check plus failure excerpts. |
+| `coding_commit` | write | ✓ | Run the `coding_verify` pipeline for the required checks, then stage commit candidates and commit only if every required check passed for this revision and tree, on the owned unprotected branch; otherwise return the failing output. The message may be any length and span multiple lines. Committing clears pending `imported_commits` state (the imported content is carried by the commit). |
+| `coding_history` | write | ✓ | Slice and dice the owned branch's committed history: `tag`/`tag_delete` (owned commits only), `restore` (rewind to any existing tag's commit, including `<branch_prefix>ckpt/` checkpoints), `reword`, `squash` (fold owned commits into one; `target` keeps everything at or below it as a parent), or `rebase` (`--onto` a new base given as any Git revision — SHA or branch name — auto-abort on conflict; for deliberately moving to a different base — routine upstream sync is automatic). Every rewrite first tags a checkpoint; a rewrite that leaves the tree byte-identical keeps recorded checks, any content change clears them. Refuses rewrites of already-pushed commits; protected branches and the source checkout are untouchable. |
 | `coding_push` | external_write | ✓ | Push the checked feature branch upstream (`push_remote`). **No force option exists.** A successful push freezes the branch's history (rewrites and rewinds past the pushed revision are refused), so it prunes the artifact's now-dead `<branch_prefix>ckpt/` checkpoint tags and reports them as `pruned_checkpoint_tags`. |
 | `coding_export_patches` | write | ✓ | Write `base_sha..commit_sha` as a `git format-patch --base` series to `<patch_export_dir or source-parent/.lisa-patches>/<id>/` (outside the source tree, enforced) and return the `git am -3` command. Re-export replaces the prior series; works after cleanup. |
 | `coding_cleanup_worktree` | write | ✓ | Remove a **clean** owned worktree (`git worktree remove`, no force). Idempotent: a worktree that was already removed (e.g. deleted by hand after the model was told so) is recorded `cleaned`, not an error. Cleanup also ends the branch, so it prunes the artifact's `<branch_prefix>ckpt/` checkpoint tags from the source root (works after worktree loss) and reports them as `pruned_checkpoint_tags`. |
-| `coding_status` | read | — | Report git status/diff + check state for an artifact without mutating it, plus the source checkout's current tip (`source_head_sha`, `source_head_branch`) beside the artifact's `base_sha` with a `source_ahead_of_base` flag — so base drift is visible and the worktree can be rebased onto the source tip promptly (`coding_history` `op=rebase`). |
+| `coding_status` | read | — | Report git status, diff stat, and check state (failure excerpts only) for an artifact without mutating it, plus the upstream tip (`source_head_sha`, `source_head_branch`) beside the artifact's `base_sha` with a `source_ahead_of_base` flag. Drift needs no action: the next edit, verification, or commit syncs. |
 
 ### Read tools (source workspace or owned worktree)
 
@@ -113,9 +113,9 @@ startup) and **degrades gracefully** to `(none)` on failure.
 The intended pipeline, each step enforced in code:
 
 ```text
-list_worktrees ─▶ create_worktree ─▶ edit_files ─▶ run_check ─▶ commit ─┬▶ push ─▶ (github pack opens PR)
- (reuse or name)   (`name` param)      (revision +1)   (at this    (all required │
-                                                         revision)   checks green) └▶ export_patches ─▶ git am -3 (your checkout)
+list_worktrees ─▶ create_worktree ─▶ edit_files ─▶ commit ─────────────┬▶ push ─▶ (github pack opens PR)
+ (reuse or name)   (`name` param)      (sync,        (sync, prepare,   │
+                                        revision +1)  fix, verify, gate)└▶ export_patches ─▶ git am -3 (your checkout)
 ```
 
 Create a worktree anchored at an upstream commit with the optional
@@ -137,51 +137,22 @@ commit, then in your own checkout run the returned command, e.g.
 messages, and a `base-commit:` trailer, so `-3` can fall back to a three-way
 merge if your branch has moved on.
 
-### Rebasing onto the source tip
+### Staying on the upstream tip
 
-A worktree branches at the source `HEAD` frozen at creation; upstream commits
-keep landing on the default branch and drift accumulates quietly. The loop
-that keeps an owned branch mergeable is **check drift → rebase early**:
-`coding_status` reports the source checkout's current tip beside the artifact
-base, and when the tip has moved past the base the model is prompted to rebase
-(`coding_history` with `op=rebase` and the tip as `target` — a SHA or a branch
-name; both resolve to the canonical commit). Rebasing replays the owned
-commits with `--empty=drop`, aborts cleanly on conflict, checkpoints the old
-head first, and refuses to rewrite pushed commits — so rebasing early is safe
-and cheap, exactly when reconciling with upstream is easiest.
-
-Every artifact is a **`WorkProduct`** (`sdk.workproducts`) carrying a six-field
-host identity — `workspace_id`, `user_id`, `user_slug`, `surface_type`,
-`surface_id`, `session_plan_digest`, plus the `task_id` of the task currently
-responsible for it. Every tool that advances an artifact (edit, patch, prepare,
-check, commit, push — never a read) claims it for the calling task via
-`WorkProduct.claim_for_task`, so a worktree started under one task and finished
-under a later one counts toward the later task's completion. Load-time
-ownership is checked via the shared canonical rule
-[`artifact.belongs_to(ctx)`](lisa_packs/coding/workflow.py)
-(`artifact_owner_matches`), so an artifact from
-another user/workspace/session simply **won't load** — this is the seam that
-lets the github pack reuse the exact same match without drift.
-The host also checks the task ID, actual Git commit and changed paths, required
-check-tree hashes, and a clean worktree before the executor can finish.
-
-The gating rules, each backed by a guard in
-[workflow.py](lisa_packs/coding/workflow.py):
-
-- **Owned worktree, outside the source** — `artifact_worktree()` resolves the
-  recorded `worktree_path`, requires `source_root` to match the configured
-  root, and rejects any worktree *inside* the source tree.
-- **Owned, unprotected branch** — `artifact_branch_is_allowed()` requires the
-  branch to start with `branch_prefix` (default `lisa/`) and not be in
-  `protected_branches` (default `main`, `master`).
-- **Checks green on this tree** — `artifact_has_current_required_checks()`
-  requires every required check to be `passed` at the current revision and
-  candidate Git tree. Patching clears old checks; changing tracked or
-  untracked candidates after a check invalidates it before commit.
-- **Patch paths are validated** — `patch_paths()` walks every `---`/`+++`
-  header of the diff through the same traversal/symlink/exclusion validator
-  (`resolve_relative_path`) the read tools use; a patch naming a forbidden
-  path is rejected before `git apply` runs.
+A worktree branches at the upstream tip — `base_branch` if configured, else
+the source checkout's `HEAD` — and every `coding_edit_files`,
+`coding_apply_patch`, `coding_verify`, and `coding_commit` first rebases onto
+that tip again ([freshness.py](lisa_packs/coding/freshness.py)), so a patch
+never applies to stale code and a commit never certifies a stale base.
+Uncommitted task edits ride along as a temporary commit that is unwound
+afterward, owned commits are checkpointed first, and replay uses
+`--empty=drop`. The sync is conservative and always leaves the branch exactly
+as it was when it declines: it skips pending imports, pushed branches,
+upstreams that do not descend from the base, tracked edits outside the task,
+and rebases that would drop owned commits; a conflict aborts and is reported
+with its paths. When upstream touched a task-owned file, the tool result names
+it so the model rereads it. `coding_history` `op=rebase` remains for moving
+onto a different base deliberately.
 
 ## The bounded-execution model
 
@@ -197,10 +168,10 @@ worktree**; Git inspection is read-only and can target the configured source
 workspace or an owned worktree. Review operations never fetch or check out
 revisions.
 
-### `run_check` requires bwrap
+### Checks require bwrap
 
-The check argv runs through the bwrap owner's delegated `bwrap_run` binding.
-[run_check.py](lisa_packs/coding/tools/run_check/run_check.py) requires a floor
+Each check argv runs through the bwrap owner's delegated `bwrap_run` binding.
+[verification.py](lisa_packs/coding/verification.py) requires a floor
 with `execution: sandbox`, `persistence: direct-write`, and an explicit `rw`
 grant covering the owned worktree. Missing authorization, a degraded sandbox,
 or a changed candidate tree fails the check without running it on the host.
@@ -241,7 +212,7 @@ The runtime merges this exclusively onto the harness-authored
 [harness pack authoring guide](https://github.com/Lisa-Harness/lisa/blob/main/docs/PACK_AUTHORING_GUIDE.md)
 and `kernel.sandbox_floor`), so the floor and the actual worktree location
 can never drift apart — the failure mode behind the 2026-10-14
-`coding_run_check` abort ("bwrap sandbox floor does not permit worktree
+check abort ("bwrap sandbox floor does not permit worktree
 writes" after the data-dir switch). The contribution is derived from the
 same `resolve_worktree_parent` the worktree tools use, so resolution changes
 flow into the floor automatically. Cache roots are detected from the
@@ -271,13 +242,17 @@ Typed, frozen, `extra="forbid"` — [config.py](lisa_packs/coding/config.py)
 `CodingPackConfig`. Read from the harness-owned session
 `resources.packs.configuration` (`ctx.pack_config`); **model tool parameters
 cannot forge it.** A `model_validator` enforces unique check ids, resolvable
-`required_check_ids`, and a `branch_prefix` that isn't empty/protected.
+`required_check_ids`, `needs` that name earlier checks, relative `inputs`,
+and a `branch_prefix` that isn't empty/protected.
 
 Key keys (with defaults): `workspace_root` (**required**, must be a Git
 worktree — resolved via the shared `sdk.workspace.resolve_workspace_root`,
-strict `require_git=True`), `checks` (tuple of `{id, argv, timeout_seconds, kind}`,
-where `kind` is `verify` (default) or `fix`),
-`required_check_ids`, `branch_prefix` (`lisa/`), `protected_branches`
+strict `require_git=True`), `checks` (tuple of
+`{id, argv, timeout_seconds, kind, inputs, reuse, needs}`, where `kind` is
+`verify` (default) or `fix`),
+`required_check_ids`, `base_branch` (empty → the source checkout's `HEAD`;
+otherwise the local branch worktrees start from and stay rebased onto),
+`branch_prefix` (`lisa/`), `protected_branches`
 (`main`,`master`), `push_remote` (`origin`), `patch_export_dir` (empty →
 `<source-parent>/.lisa-patches`; must be absolute and outside the source),
 `worktree_dir` (empty → `<data-dir>/git-worktrees/<workspace-name>` from the
@@ -325,9 +300,9 @@ resources:
 
 ### With checks and gating
 
-Define the finite command vectors `coding_run_check` may run, mark which are
-required before `coding_commit`/`coding_push`, and tune the branch policy and
-bounds. These `checks` are the *only* argv the pack will execute — the model
+Define the finite command vectors `coding_verify` may run, mark which are
+required before `coding_commit`/`coding_push`, describe how each may be
+reused, and tune the branch policy and bounds. These `checks` are the *only* argv the pack will execute — the model
 cannot run an arbitrary command.
 
 ```yaml
@@ -355,13 +330,16 @@ resources:
           - id: format
             argv: ["uv", "run", "--no-sync", "--no-cache", "python", "-m", "ruff", "format", "."]
             kind: fix  # rewrites files; its edits become a new revision
-          - id: unit
-            argv: ["uv", "run", "--no-sync", "--no-cache", "python", "-m", "pytest", "-q"]
-            timeout_seconds: 300
           - id: type
             argv: ["uv", "run", "--no-sync", "--no-cache", "python", "-m", "mypy", "src"]
             timeout_seconds: 180
-        required_check_ids: [unit, type]
+            inputs: ["**/*.py", "pyproject.toml"]  # reuse a pass while these are unchanged
+          - id: unit
+            argv: ["uv", "run", "--no-sync", "--no-cache", "python", "-m", "pytest", "-q"]
+            timeout_seconds: 300
+            inputs: ["src/", "tests/", "pyproject.toml"]
+            needs: [type]  # skipped when type fails
+        required_check_ids: [type, unit]
       lisa-pack-bwrap:
         sandbox:
           floor:
@@ -380,8 +358,22 @@ routing:
 ```
 
 With this plan, a change is gated: `coding_apply_patch` bumps the revision and
-clears check results; both `unit` and `type` must re-pass on the candidate tree
-or `coding_commit` returns an error. Address the interpreter with the
+clears check results; `coding_commit` reruns `format` and both required checks
+on the candidate tree and refuses unless they pass.
+
+Check attributes let the harness run checks optimally:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `kind` | `verify` | `fix` checks (formatters, autofixers) run first, repeatedly until they stop editing; they must be idempotent. `verify` checks must not edit files. |
+| `inputs` | `[]` | Repository-relative globs (`**`, `*`, `?`, trailing `/` for a directory) naming the tracked files the check reads. A pass is reused while no matching file differs from the tree it passed on; empty reuses only an identical tree. |
+| `reuse` | `true` | `false` reruns the check every time (nondeterministic or networked checks). |
+| `needs` | `[]` | Earlier checks that must pass in the same verification; otherwise this check is skipped. Verify checks only. |
+
+Reuse records live in the worktree's private Git directory and are keyed by
+the argv, kind, inputs, and preparation digests, so changing a check or the
+toolchain reruns it. Reused results are recorded at the current revision and
+tree like fresh ones. Address the interpreter with the
 worktree-owned toolchain, e.g.
 `uv run --no-sync --no-cache …` — the bounded executor does no shell PATH
 lookups for Python and a bare `python` would run whatever the sandbox image
@@ -398,8 +390,8 @@ machines. For `uv sync` (preparation) keep the cache: installing is its job.
 
 `checks` alone assume the workspace is already installable. A
 `preparation_recipes` entry makes `coding_prepare_workspace` run one finite,
-sandboxed command and record evidence; `coding_run_check` and `coding_commit`
-refuse to proceed until that evidence matches the current recipe and
+sandboxed command and record evidence; `coding_verify` and `coding_commit`
+rerun it whenever that evidence no longer matches the current recipe and
 manifests. The pack owns the mechanics (containment, provenance probes,
 baseline checks); the session owns the toolchain.
 
@@ -637,7 +629,7 @@ cross-imports** (the sdk/packs rule); they hand off only through typed code
   of work).
 - **github** = *publication* of that artifact (push → PR).
 
-`coding_run_check` doesn't import bwrap — it dispatches through the tool
+`coding_verify` doesn't import bwrap — it dispatches through the tool
 registry to `bwrap_run`. Ownership (`belongs_to`) and the artifact type live in
 the SDK so the github pack matches identity identically. The single
 `workspace_root` config key is the shared channel; only the strictness differs
