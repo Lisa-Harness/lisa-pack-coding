@@ -174,7 +174,7 @@ Revision-pinned reads survive edits and carry an anchor
 (`coding_read_file:<artifact>:<path>@<commit>:<start>-<end>`) that
 `resolve_history_anchor` re-reads from the immutable commit. `coding_status`'s
 `history_snapshot` keeps one line per live artifact (branch, revision, dirty
-paths) resident in place of folded results; it says `unknown` rather than
+paths) in the next turn's `## Pack State` section once results fold; it says `unknown` rather than
 `clean` when `git status` fails. Diffs between SHAs (`branch`, `trees`,
 `commit`) stay resident across edits, since their endpoints are immutable. `coding_execute` sets
 `working_set_tokens: 80000`. The eval `tests/evals/test_history_semantics.py`
