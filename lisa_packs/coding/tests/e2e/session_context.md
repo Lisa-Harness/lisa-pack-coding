@@ -18,6 +18,7 @@ resources:
             ipc: shared
             paths:
               ${WORKSPACE_PARENT}: rw
+              ${RUN_DIR}/data/git-worktrees: rw
               /tmp: rw
             tmpfs_budget_bytes: 67108864
       lisa-pack-coding:
@@ -46,7 +47,7 @@ providers:
   modes:
     default: lisa-pack-memory
   tools:
-    web_search: lisa-pack-serper
+    web_search: e2etest-offline
 routing: { from: { pack: lisa-pack-core, session: default } }
 execution:
   max_session_tokens: 3000000
