@@ -52,10 +52,17 @@ class _Driver:
         self.trajectory = Trajectory(name="history-semantics")
         self.results: dict[str, Any] = {}
 
-    async def call(self, call_id: str, tool_id: str, params: dict[str, Any]) -> Any:
+    async def call(
+        self,
+        call_id: str,
+        tool_id: str,
+        params: dict[str, Any],
+        *,
+        fails: bool = False,
+    ) -> Any:
         run = await run_tool(self.catalog, tool_id, self.factory, params)
         self.trajectory.record(run)
-        assert run.result.error == "", f"{tool_id}: {run.result.error}"
+        assert bool(run.result.error) is fails, f"{tool_id}: {run.result.error}"
         definition = _deserialize_tool(self.catalog[tool_id])
         claims = resolve_history_keys(
             definition.history, definition.implementation_module, params, run.result
@@ -176,3 +183,70 @@ async def test_coding_history_claims_fold_only_stale_results(
     assert dead == {"r1", "r2", "s1", "d1", "v1"}
     turn_scoped = {r.call_id for r in drive.ledger.foldable(turn_finished=True)} - dead
     assert turn_scoped == {"e1"}
+
+
+@pytest.mark.eval
+@pytest.mark.asyncio
+async def test_auto_rebase_stales_reads_of_upstream_paths_even_on_failure(
+    tmp_path: Path, catalog: dict[str, dict[str, object]]
+) -> None:
+    repo = await git_repo(tmp_path)
+    await repo.commit_file("other.txt", "untouched\n", "other")
+    await repo.commit_file("calm.txt", "calm\n", "calm")
+    base = await repo.head()
+    factory = ToolContextFactory(
+        root=repo.root, pack_config=_config(repo.root), data_dir=tmp_path / "data"
+    )
+    factory.identity["task_id"] = "rebase-task"
+    _verified_sandbox(factory)
+    drive = _Driver(catalog, factory)
+
+    created = await drive.call("c0", "coding_create_worktree", {"summary": "rebase"})
+    artifact = str(created.output_json["artifact_id"])
+    other = {"artifact_id": artifact, "path": "other.txt"}
+    await drive.call("o1", "coding_read_file", other)
+    await drive.call("k1", "coding_read_file", {"artifact_id": artifact, "path": "calm.txt"})
+    await drive.call("p1", "coding_read_file", {**other, "revision": base})
+
+    # Upstream moves other.txt; the edit to app.txt rebases first.
+    await repo.commit_file("other.txt", "upstream 1\n", "upstream 1")
+    edited = await drive.call(
+        "e1", "coding_apply_patch", {"artifact_id": artifact, "patch": PATCH}
+    )
+    assert edited.output_json["sync"]["upstream_paths"] == ["other.txt"]
+    assert drive.record("o1").dead and drive.record("o1").stale_by == "e1"
+    # Paths upstream left alone and SHA-pinned reads survive the rebase.
+    assert not drive.record("k1").dead and not drive.record("p1").dead
+
+    # A rejected edit still rebased first, so its reads of moved paths go stale.
+    await drive.call("o2", "coding_read_file", other)
+    await repo.commit_file("other.txt", "upstream 2\n", "upstream 2")
+    stale_hash = {
+        "kind": "update",
+        "path": "app.txt",
+        "expected_sha256": "0" * 64,
+        "replacements": [{"old_text": "hello", "new_text": "bye"}],
+    }
+    failed = await drive.call(
+        "e2",
+        "coding_edit_files",
+        {"artifact_id": artifact, "edits": [stale_hash]},
+        fails=True,
+    )
+    assert "changed since it was read" in failed.error
+    assert drive.record("o2").dead and drive.record("o2").stale_by == "e2"
+    assert drive.record("e2").keys == [] and drive.record("e2").scope == "task"
+
+    # Verification and commit sync too.
+    await drive.call("o3", "coding_read_file", other)
+    await repo.commit_file("other.txt", "upstream 3\n", "upstream 3")
+    await drive.call("v1", "coding_verify", {"artifact_id": artifact})
+    assert drive.record("o3").dead and drive.record("o3").stale_by == "v1"
+
+    await drive.call("o4", "coding_read_file", other)
+    await repo.commit_file("other.txt", "upstream 4\n", "upstream 4")
+    await drive.call(
+        "m1", "coding_commit", {"artifact_id": artifact, "message": "Rebased change"}
+    )
+    assert drive.record("o4").dead and drive.record("o4").stale_by == "m1"
+    assert not drive.record("k1").dead and not drive.record("p1").dead

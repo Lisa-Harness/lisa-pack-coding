@@ -50,6 +50,9 @@ class SyncOutcome:
     upstream_commits: int = 0
     #: Task-owned paths upstream also changed; reread them before editing.
     overlapping_paths: list[str] = field(default_factory=list)
+    #: Every path the rebase pulled in from upstream (set only once synced);
+    #: history invalidates earlier working-tree reads of exactly these paths.
+    upstream_paths: list[str] = field(default_factory=list)
     conflict_paths: list[str] = field(default_factory=list)
     detail: str = ""
 
@@ -88,6 +91,7 @@ class SyncOutcome:
             "previous_base_sha": self.previous_base_sha,
             "upstream_commits": self.upstream_commits,
             "overlapping_paths": self.overlapping_paths,
+            "upstream_paths": self.upstream_paths,
             "conflict_paths": self.conflict_paths,
             "detail": self.detail,
         }
@@ -289,6 +293,7 @@ async def sync_with_upstream(
     artifact.checks = {}
     if wip:
         artifact.status = "patched"
+    outcome.upstream_paths = upstream_paths
     outcome.status = "synced"
     return outcome
 

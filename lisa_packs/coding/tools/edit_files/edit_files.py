@@ -682,7 +682,16 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         artifact.status = "patched"
         await ctx.code_change_artifact_store.save(artifact)
     except (CodingPathError, CodingWorkflowError, OSError, ValueError) as exc:
-        return ToolResult(tool_id=TOOL_ID, error=with_sync_note(str(exc), sync))
+        return ToolResult(
+            tool_id=TOOL_ID,
+            error=with_sync_note(str(exc), sync),
+            # A rebase that landed before the failure still stales reads.
+            output_json=(
+                {"artifact_id": params.artifact_id, "sync": sync.to_json()}
+                if sync is not None
+                else {}
+            ),
+        )
 
     return ToolResult(
         tool_id=TOOL_ID,
@@ -695,5 +704,6 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             "revision": artifact.revision,
             "changed_paths": artifact.changed_paths,
             "patch_sha256": sha256(patch.encode("utf-8")).hexdigest(),
+            **({"sync": sync.to_json()} if sync is not None else {}),
         },
     )

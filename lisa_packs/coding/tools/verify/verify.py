@@ -13,7 +13,8 @@ from kernel.models import ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
 
 from lisa_packs.coding.config import get_coding_config
-from lisa_packs.coding.verification import verify_artifact
+from lisa_packs.coding.freshness import with_sync_note
+from lisa_packs.coding.verification import VerificationAborted, verify_artifact
 from lisa_packs.coding.workflow import CodingWorkflowError, load_owned_artifact
 
 TOOL_ID = "coding_verify"
@@ -38,6 +39,13 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         )
         report = await verify_artifact(
             ctx, artifact, config=config, check_ids=params.check_ids
+        )
+    except VerificationAborted as exc:
+        return ToolResult(
+            tool_id=TOOL_ID,
+            error=with_sync_note(str(exc), exc.sync),
+            # A rebase that landed before the failure still stales reads.
+            output_json={"artifact_id": params.artifact_id, "sync": exc.sync.to_json()},
         )
     except (CodingWorkflowError, OSError, ValueError) as exc:
         return ToolResult(tool_id=TOOL_ID, error=str(exc))

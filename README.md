@@ -151,7 +151,8 @@ as it was when it declines: it skips pending imports, pushed branches,
 upstreams that do not descend from the base, tracked edits outside the task,
 and rebases that would drop owned commits; a conflict aborts and is reported
 with its paths. When upstream touched a task-owned file, the tool result names
-it so the model rereads it. `coding_history` `op=rebase` remains for moving
+it so the model rereads it, and earlier reads of every upstream-changed path
+fold (see History semantics below). `coding_history` `op=rebase` remains for moving
 onto a different base deliberately.
 
 ### History semantics (what goes stale)
@@ -164,11 +165,16 @@ their `r<sha256>` ref (folding never loses evidence):
 | --- | --- | --- |
 | `coding_read_file` | the artifact, path, revision, and line window | — |
 | `coding_edit_files` / `coding_apply_patch` | — (turn-scoped) | working-tree reads of the edited paths, status, verify, working-tree/staged/unstaged diffs |
-| `coding_verify` / `coding_commit` | `coding.verify:<artifact>` | commit also: status, working-tree/staged/unstaged diffs |
+| `coding_verify` / `coding_commit` | `coding.verify:<artifact>` | status; commit also: working-tree/staged/unstaged diffs |
 | `coding_status` | `coding.status:<artifact>` | — |
 | `coding_git_diff` | the comparison, endpoints, scope, paths, and page | — |
 | `coding_history` | — (turn-scoped) | every read, status, verify, and diff of the artifact |
 | search, find, list, outline, log | — (turn-scoped) | — |
+
+An edit, patch, verify, or commit that auto-rebased also stales working-tree
+reads of every path upstream changed (`sync.upstream_paths` in its result).
+That claim reads only the result, so it holds even when the call then fails,
+for example an edit rejected for a stale hash after the rebase landed.
 
 Revision-pinned reads survive edits and carry an anchor
 (`coding_read_file:<artifact>:<path>@<commit>:<start>-<end>`) that

@@ -221,6 +221,7 @@ async def test_edit_rebases_dirty_work_onto_moved_upstream(tmp_path: Path) -> No
 
     assert added.error == "", added.error
     assert "Rebased onto upstream" in added.output_text
+    assert added.output_json["sync"]["upstream_paths"] == ["upstream.txt"]
     assert (worktree / "upstream.txt").read_text(encoding="utf-8") == "from upstream\n"
     assert (worktree / "app.txt").read_text(encoding="utf-8") == "hello world\n"
     assert (worktree / "notes.md").exists()
@@ -233,6 +234,36 @@ async def test_edit_rebases_dirty_work_onto_moved_upstream(tmp_path: Path) -> No
         _context(root, store, {"artifact_id": artifact_id, "message": "On new base"})
     )
     assert committed.error == "", committed.error
+
+
+@pytest.mark.parametrize("tool", ["verify", "commit"])
+@pytest.mark.asyncio
+async def test_failure_after_rebase_still_reports_the_sync(tmp_path: Path, tool: str) -> None:
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    checks = [_check("unit")]
+    artifact_id, _ = await _patched(root, store, checks)
+    (root / "upstream.txt").write_text("from upstream\n", encoding="utf-8")
+    await _git(root, "add", "upstream.txt")
+    await _git(root, "commit", "-m", "upstream moves")
+
+    def rewrite(worktree: Path) -> None:
+        (worktree / "app.txt").write_text("rewritten\n", encoding="utf-8")
+
+    params: dict[str, object] = {"artifact_id": artifact_id}
+    if tool == "commit":
+        params["message"] = "Change"
+    result = await (verify if tool == "verify" else commit)(
+        _context(root, store, params, checks=checks, sandbox_effect=rewrite)
+    )
+
+    assert "must be configured with kind: fix" in result.error
+    assert result.error.startswith("Rebased onto upstream")
+    sync = result.output_json["sync"] if tool == "verify" else result.output_json[
+        "verification"
+    ]["sync"]
+    assert sync["status"] == "synced" and sync["upstream_paths"] == ["upstream.txt"]
+    assert result.output_json["artifact_id"] == artifact_id
 
 
 @pytest.mark.asyncio
@@ -252,6 +283,8 @@ async def test_conflicting_upstream_leaves_branch_on_previous_base(tmp_path: Pat
 
     assert added.error == "", added.error
     assert "conflicts with this work in app.txt" in added.output_text
+    # Nothing landed, so no working-tree read went stale.
+    assert added.output_json["sync"]["upstream_paths"] == []
     assert (worktree / "app.txt").read_text(encoding="utf-8") == "hello world\n"
     assert (worktree / "notes.md").exists()
     after = await store.get(artifact_id)

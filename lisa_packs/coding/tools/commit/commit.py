@@ -13,7 +13,8 @@ from kernel.models import ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
 
 from lisa_packs.coding.config import CodingPackConfig, get_coding_config
-from lisa_packs.coding.verification import VerifyReport, verify_artifact
+from lisa_packs.coding.freshness import SyncOutcome, with_sync_note
+from lisa_packs.coding.verification import VerificationAborted, VerifyReport, verify_artifact
 from lisa_packs.coding.workflow import (
     CodingWorkflowError,
     artifact_branch_is_allowed,
@@ -48,10 +49,29 @@ def _committed_text(revision: int, commit_sha: str, report: VerifyReport) -> str
     )
 
 
+def _failed(artifact_id: str, exc: Exception, sync: SyncOutcome | None) -> ToolResult:
+    error = str(exc)
+    if isinstance(exc, VerificationAborted):
+        # Later failures quote the report, which already carries the note.
+        sync = exc.sync
+        error = with_sync_note(error, sync)
+    return ToolResult(
+        tool_id=TOOL_ID,
+        error=error,
+        # A rebase that landed before the failure still stales reads.
+        output_json=(
+            {"artifact_id": artifact_id, "verification": {"sync": sync.to_json()}}
+            if sync is not None
+            else {}
+        ),
+    )
+
+
 async def execute(ctx: ToolExecutionContext) -> ToolResult:
     """Stage explicit changed paths and commit only a current checked revision."""
 
     params = Parameters.model_validate(ctx.parameters)
+    sync: SyncOutcome | None = None
     try:
         config = get_coding_config(ctx)
         artifact = await load_owned_artifact(
@@ -66,6 +86,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         if not artifact.changed_paths:
             raise CodingWorkflowError("Artifact has no task-owned changed paths to commit.")
         report = await verify_artifact(ctx, artifact, config=config)
+        sync = report.sync
         paths = list(dict.fromkeys(artifact.changed_paths))
         candidate_tree = await candidate_tree_sha(worktree, config=config, paths=paths)
         if not artifact_has_current_required_checks(artifact, candidate_tree=candidate_tree):
@@ -99,7 +120,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         artifact.import_commit = ""
         await ctx.code_change_artifact_store.save(artifact)
     except (CodingWorkflowError, OSError, ValueError) as exc:
-        return ToolResult(tool_id=TOOL_ID, error=str(exc))
+        return _failed(params.artifact_id, exc, sync)
 
     return ToolResult(
         tool_id=TOOL_ID,

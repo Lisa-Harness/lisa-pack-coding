@@ -12,3 +12,8 @@ approval_preview: "sync, prepare, and run the configured checks in the owned wor
 timeout_seconds: 0
 history:
   key: "coding.verify:{artifact_id}"
+  invalidates:
+    # Checks and the base move, so the status line is stale either way.
+    - "coding.status:{artifact_id}"
+    # An auto-rebase stales working-tree reads of every path upstream changed.
+    - "coding.read:{result.artifact_id}:{result.sync.upstream_paths[]}@-:"

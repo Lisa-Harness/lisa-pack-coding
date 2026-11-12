@@ -47,6 +47,7 @@ from lisa_packs.coding.workflow import (
 
 __all__ = [
     "CheckOutcome",
+    "VerificationAborted",
     "VerifyReport",
     "failure_excerpt",
     "input_matches",
@@ -101,6 +102,14 @@ class CheckOutcome:
             "fixed_paths": self.fixed_paths,
             "detail": self.detail,
         }
+
+
+class VerificationAborted(CodingWorkflowError):
+    """Verification failed after the upstream sync already ran."""
+
+    def __init__(self, message: str, sync: SyncOutcome) -> None:
+        super().__init__(message)
+        self.sync = sync
 
 
 @dataclass(slots=True)
@@ -495,14 +504,34 @@ async def verify_artifact(
     config: CodingPackConfig,
     check_ids: list[str] | None = None,
 ) -> VerifyReport:
-    """Sync, prepare, fix, and verify ``artifact``; persist after every step."""
+    """Sync, prepare, fix, and verify ``artifact``; persist after every step.
+
+    A failure after the sync raises :class:`VerificationAborted` carrying it,
+    so callers can still report a rebase that already landed.
+    """
 
     plan = plan_checks(config, artifact, list(check_ids or ()))
     worktree = artifact_worktree(artifact, config=config)
     sync = await sync_with_upstream(artifact, worktree=worktree, config=config)
-    if sync.status == "synced":
-        await ctx.code_change_artifact_store.save(artifact)
-    report = VerifyReport(sync=sync)
+    try:
+        if sync.status == "synced":
+            await ctx.code_change_artifact_store.save(artifact)
+        return await _verify_synced(
+            ctx, artifact, VerifyReport(sync=sync), plan=plan, worktree=worktree, config=config
+        )
+    except (CodingWorkflowError, OSError, ValueError) as exc:
+        raise VerificationAborted(str(exc), sync) from exc
+
+
+async def _verify_synced(
+    ctx: ToolExecutionContext,
+    artifact: WorkProduct,
+    report: VerifyReport,
+    *,
+    plan: list[CodingCheck],
+    worktree: Path,
+    config: CodingPackConfig,
+) -> VerifyReport:
     report.prepared = await _ensure_prepared(
         ctx, artifact, worktree=worktree, config=config
     )

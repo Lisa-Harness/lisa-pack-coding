@@ -12,6 +12,9 @@ history:
   key: "coding.verify:{artifact_id}"
   invalidates:
     - "coding.status:{artifact_id}"
+    # An auto-rebase stales working-tree reads of every path upstream changed
+    # (result-only, so it fires even when the commit then fails).
+    - "coding.read:{result.artifact_id}:{result.verification.sync.upstream_paths[]}@-:"
     # Only working-tree diffs; branch/trees/commit diffs are pinned to SHAs.
     - "coding.diff:{artifact_id}:working_tree:"
     - "coding.diff:{artifact_id}:staged:"

@@ -9,6 +9,9 @@ history:
   scope: turn
   invalidates:
     - "coding.read:{artifact_id}:{result.changed_paths[]}@-:"
+    # An auto-rebase stales working-tree reads of every path upstream changed
+    # (result-only, so it fires even when the edit then fails).
+    - "coding.read:{result.artifact_id}:{result.sync.upstream_paths[]}@-:"
     - "coding.verify:{artifact_id}"
     - "coding.status:{artifact_id}"
     # Only working-tree diffs; branch/trees/commit diffs are pinned to SHAs.
