@@ -4,3 +4,5 @@ description: "Compare branches, exact commits/trees, one commit's first-parent c
 exportable: true
 effect: read
 max_calls_per_turn: 30
+history:
+  key: "coding.diff:{result.artifact_id}:{comparison}:{result.from_endpoint}..{result.to_endpoint}:{scope}:{paths}:{offset}:{limit}:{include_patches}"

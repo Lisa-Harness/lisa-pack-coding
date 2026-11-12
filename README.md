@@ -154,6 +154,32 @@ with its paths. When upstream touched a task-owned file, the tool result names
 it so the model rereads it. `coding_history` `op=rebase` remains for moving
 onto a different base deliberately.
 
+### History semantics (what goes stale)
+
+Each tool's `history:` block tells the kernel which earlier results a new
+result makes stale, so the kernel folds them to a one-line stub that keeps
+their `r<sha256>` ref (folding never loses evidence):
+
+| Result | Key | Makes stale |
+| --- | --- | --- |
+| `coding_read_file` | the artifact, path, revision, and line window | — |
+| `coding_edit_files` / `coding_apply_patch` | — (turn-scoped) | working-tree reads of the edited paths, status, verify, working-tree/staged/unstaged diffs |
+| `coding_verify` / `coding_commit` | `coding.verify:<artifact>` | commit also: status, working-tree/staged/unstaged diffs |
+| `coding_status` | `coding.status:<artifact>` | — |
+| `coding_git_diff` | the comparison, endpoints, scope, paths, and page | — |
+| `coding_history` | — (turn-scoped) | every read, status, verify, and diff of the artifact |
+| search, find, list, outline, log | — (turn-scoped) | — |
+
+Revision-pinned reads survive edits and carry an anchor
+(`coding_read_file:<artifact>:<path>@<commit>:<start>-<end>`) that
+`resolve_history_anchor` re-reads from the immutable commit. `coding_status`'s
+`history_snapshot` keeps one line per live artifact (branch, revision, dirty
+paths) resident in place of folded results; it says `unknown` rather than
+`clean` when `git status` fails. Diffs between SHAs (`branch`, `trees`,
+`commit`) stay resident across edits, since their endpoints are immutable. `coding_execute` sets
+`working_set_tokens: 80000`. The eval `tests/evals/test_history_semantics.py`
+and the `tests/e2e/history_fold.scenario.yml` scenario pin this table.
+
 ## The bounded-execution model
 
 No tool ever runs a shell or holds unbounded output.

@@ -4,3 +4,5 @@ description: "Read a bounded, paginated commit history at a revision or between 
 exportable: true
 effect: read
 max_calls_per_turn: 30
+history:
+  scope: turn

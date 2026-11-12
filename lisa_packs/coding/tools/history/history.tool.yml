@@ -5,3 +5,10 @@ exportable: true
 effect: write
 approval_required: true
 approval_preview: "rewrite owned branch history, tags, or commit messages"
+history:
+  scope: turn
+  invalidates:
+    - "coding.read:{artifact_id}:"
+    - "coding.verify:{artifact_id}"
+    - "coding.status:{artifact_id}"
+    - "coding.diff:{artifact_id}:"

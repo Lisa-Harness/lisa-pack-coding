@@ -33,6 +33,8 @@ fork_allowed: true
 approval_continuation: resume
 task_completion: checked_commit
 task_artifact_tool_id: coding_create_worktree
+# Soft-epoch trigger cap: fold aged history before the live array grows past this.
+working_set_tokens: 80000
 allowed_operation_ids: [delegate, fork, recall_memory, synthesize_and_store_learning]
 allowed_tool_ids:
   - coding_list_worktrees

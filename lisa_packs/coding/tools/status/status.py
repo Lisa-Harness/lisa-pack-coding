@@ -9,6 +9,8 @@ diff).
 
 from __future__ import annotations
 
+import re
+
 from kernel.models import ToolExecutionContext, ToolResult
 from pydantic import BaseModel, Field
 
@@ -23,6 +25,9 @@ from lisa_packs.coding.workflow import (
 )
 
 TOOL_ID = "coding_status"
+_ARTIFACT_KEY = re.compile(r"^coding\.[a-z]+:(?P<artifact>[^:]+)")
+_SNAPSHOT_ARTIFACTS = 4
+_SNAPSHOT_PATHS = 12
 
 
 class Parameters(BaseModel):
@@ -128,3 +133,47 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             },
         },
     )
+
+
+async def history_snapshot(ctx: ToolExecutionContext, keys: list[str]) -> str:
+    """Summarize the live state of the artifacts named in a turn's history keys.
+
+    Folded reads and statuses stay dereferenceable by ref; this line keeps
+    the current branch, revision, and dirty paths resident without them.
+    """
+
+    artifact_ids = list(
+        dict.fromkeys(
+            match.group("artifact")
+            for key in keys
+            if (match := _ARTIFACT_KEY.match(key)) and match.group("artifact") != "-"
+        )
+    )[:_SNAPSHOT_ARTIFACTS]
+    if not artifact_ids:
+        return ""
+    config = get_coding_config(ctx)
+    lines: list[str] = []
+    for artifact_id in artifact_ids:
+        try:
+            artifact = await load_owned_artifact(
+                ctx, artifact_id=artifact_id, config=config
+            )
+            status = await run_git(
+                artifact_worktree(artifact, config=config),
+                ("status", "--short"),
+                config=config,
+            )
+        except (CodingWorkflowError, OSError, ValueError):
+            continue
+        if status.return_code != 0 or status.output_truncated:
+            shown = "unknown (git status failed)"
+        else:
+            dirty = [ln.strip() for ln in status.stdout.splitlines() if ln.strip()]
+            shown = ", ".join(dirty[:_SNAPSHOT_PATHS]) or "clean"
+            if len(dirty) > _SNAPSHOT_PATHS:
+                shown += f", +{len(dirty) - _SNAPSHOT_PATHS} more"
+        lines.append(
+            f"artifact {artifact.artifact_id}: {artifact.status} on {artifact.branch} "
+            f"at {artifact.revision}; worktree: {shown}"
+        )
+    return "\n".join(lines)

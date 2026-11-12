@@ -4,3 +4,5 @@ description: "Find bounded non-generated source files in the source workspace or
 exportable: true
 effect: read
 max_calls_per_turn: 50
+history:
+  scope: turn

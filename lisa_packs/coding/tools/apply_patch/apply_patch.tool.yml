@@ -5,3 +5,13 @@ exportable: true
 effect: write
 approval_required: true
 approval_preview: "apply a bounded patch to the owned worktree"
+history:
+  scope: turn
+  invalidates:
+    - "coding.read:{artifact_id}:{result.changed_paths[]}@-:"
+    - "coding.verify:{artifact_id}"
+    - "coding.status:{artifact_id}"
+    # Only working-tree diffs; branch/trees/commit diffs are pinned to SHAs.
+    - "coding.diff:{artifact_id}:working_tree:"
+    - "coding.diff:{artifact_id}:staged:"
+    - "coding.diff:{artifact_id}:unstaged:"

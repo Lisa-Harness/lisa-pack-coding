@@ -4,3 +4,5 @@ description: "Extract a bounded source outline from the source workspace or an o
 exportable: true
 effect: read
 max_calls_per_turn: 50
+history:
+  scope: turn

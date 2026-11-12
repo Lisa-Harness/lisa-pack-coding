@@ -10,3 +10,5 @@ approval_preview: "sync, prepare, and run the configured checks in the owned wor
 # (sdk/AUTHORING.md). A fixed wrapper bound can never be sized to every
 # session's check list.
 timeout_seconds: 0
+history:
+  key: "coding.verify:{artifact_id}"

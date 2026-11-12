@@ -136,3 +136,30 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             "excerpt": excerpt,
         },
     )
+
+
+async def resolve_history_anchor(ctx: ToolExecutionContext, anchor: str) -> str | None:
+    """Re-read a folded revision-pinned excerpt from its immutable commit.
+
+    The anchor is ``coding_read_file:<artifact>:<path>@<commit>:<start>-<end>``;
+    only revision reads carry one, so the content is reproducible exactly.
+    """
+
+    body = anchor.removeprefix(f"{TOOL_ID}:")
+    artifact_id, _, rest = body.partition(":")
+    located, _, window = rest.rpartition(":")
+    path, _, revision = located.rpartition("@")
+    start, _, end = window.partition("-")
+    if not (artifact_id and path and revision and start.isdigit() and end.isdigit()):
+        return None
+    parameters = {
+        "artifact_id": None if artifact_id == "-" else artifact_id,
+        "path": path,
+        "revision": revision,
+        "start_line": int(start),
+        "end_line": int(end),
+    }
+    result = await execute(ctx.model_copy(update={"parameters": parameters}))
+    if result.error or not isinstance(result.output_json, dict):
+        return None
+    return f"{path}@{revision} lines {start}-{end}:\n{result.output_json['excerpt']}"

@@ -4,3 +4,5 @@ description: "Search the source workspace or an owned artifact worktree through 
 exportable: true
 effect: read
 max_calls_per_turn: 40
+history:
+  scope: turn

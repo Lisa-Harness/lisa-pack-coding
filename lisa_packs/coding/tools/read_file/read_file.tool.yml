@@ -4,3 +4,6 @@ description: "Read fresh bounded text, defaulting to the task's owned worktree. 
 exportable: true
 effect: read
 max_calls_per_turn: 50
+history:
+  key: "coding.read:{result.artifact_id}:{result.path}@{result.revision}:{result.start_line}-{result.end_line}"
+  anchor: "coding_read_file:{result.artifact_id}:{result.path}@{result.revision}:{result.start_line}-{result.end_line}"

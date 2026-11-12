@@ -1,0 +1,41 @@
+# Deterministic, token-free check of the coding pack's history semantics: the
+# model rereads a file (superseding the first read), edits it (invalidating
+# the reread and the status), runs the check, and commits (superseding it). The
+# thread entry must carry refd history records for the reads plus the pack's
+# turn-end snapshot. The model is model/history_fold.py, not an LLM.
+# Run: uv run --frozen lisa-e2e run <this file>   (from the lisa framework checkout)
+id: coding/history-fold-scripted
+session_context: session_context.md
+fixture:
+  repo: fixtures/stats
+policy: policy_allow_coding.yaml
+model:
+  script: model/history_fold.py
+packs:
+  - lisa-pack-bash
+  - lisa-pack-bwrap
+  - lisa-pack-coding
+  - lisa-pack-markdown
+  - lisa-pack-personas
+turns:
+  - Fix the off-by-one in stats.mean in an isolated worktree and run the required checks.
+approvals:
+  approve: ["*"]
+  deny: [coding_push, coding_cleanup_worktree]
+budgets:
+  max_messages: 4
+  max_continues: 0
+  max_yield_replies: 0
+  wall_clock_s: 300
+oracles:
+  hygiene:
+    - not_aborted: {}
+    - no_turn_errors: {}
+    - no_runtime_errors: {}
+  history:
+    - history_folded: {tool: coding_read_file, min: 2, snapshot: lisa-pack-coding}
+    - history_folded: {tool: [coding_status, coding_verify, coding_commit], min: 3}
+    - history_folded: {tool: coding_edit_files, min: 1}
+  edit:
+    - diff_touches: {paths: [stats.py]}
+    - checks_current: {}
