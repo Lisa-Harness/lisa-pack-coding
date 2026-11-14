@@ -2,7 +2,9 @@
 
 The pack's tools run contained (checks, preparation, commit verification)
 inside owned worktrees under ``resolve_worktree_parent`` — a *runtime-derived*
-path the harness cannot know when authoring the session floor. This module
+path the harness cannot know when authoring the session floor. The
+contribution is implementation-agnostic: it names paths and postures, and
+each sandbox implementation validates what it can enforce. This module
 declares those needs through the ``lisa.extensions.sandbox_floors`` entry
 point: the runtime merges the contribution exclusively onto the
 harness-authored floor at session assembly (see
@@ -126,7 +128,8 @@ def floor_contribution(
     than refusing to load the pack at all.
 
     Path expansion mirrors ``resolve_worktree_parent``: ``~`` expands and
-    the parent resolves so the bind matches the real path bwrap sees.
+    the parent resolves so the bind matches the real path the sandbox
+    implementation sees.
     ``context`` carries the kernel's :class:`SandboxFloorContext` fields
     (``data_dir``, ``workspace_root``) as a mapping.
     """

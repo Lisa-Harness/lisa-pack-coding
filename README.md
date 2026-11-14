@@ -5,12 +5,16 @@ work: an isolated Git worktree plus a durable, identity-bound change artifact.
 It is where the model *makes* a change — read the source, propose a patch,
 check it, commit it — under a policy the user sets and the host enforces.
 
-> Sandboxing (bubblewrap containment) comes from the sibling pack
-> [`lisa-pack-bwrap`](../bwrap/README.md); an interactive shell and approvals
-> come from [`lisa-pack-bash`](../bash/README.md). This pack composes through
-> them; configured checks require an authorized bwrap execution floor.
-> Publication (push and pull request) is opt-in and handled through this pack
-> and [`lisa-pack-github`](../github/README.md), respectively.
+> Sandboxing comes from whichever sandbox pack the session selects: bubblewrap
+> containment from [`lisa-pack-bwrap`](../bwrap/README.md) on Linux, or the
+> Job Object + CLM stack in `lisa-pack-powershell` on Windows. This pack reads
+> the session's provider-neutral **sandbox runner** and never names a sandbox
+> tool, so the same checks run contained on either platform. An interactive
+> shell and approvals come from [`lisa-pack-bash`](../bash/README.md) (POSIX)
+> or `lisa-pack-powershell` (Windows). Configured checks require an authorized
+> sandbox execution floor. Publication (push and pull request) is opt-in and
+> handled through this pack and [`lisa-pack-github`](../github/README.md),
+> respectively.
 
 **Review** here means auditing the security and ownership rules below against
 [workflow.py](lisa_packs/coding/workflow.py) and the tool bodies. **Modify**
@@ -50,7 +54,7 @@ target the source workspace or an owned worktree.
 | `coding_apply_patch` | write | ✓ | Fallback for existing unified diffs: prevalidate (`git apply --check`) and apply a bounded patch. Bumps `revision`, records `changed_paths`, **clears `checks`** (stale results are invalidated). |
 | `coding_import_commits` | write | ✓ | Replay one already-merged upstream commit onto the owned worktree: the worktree must be created with `import_commit` (base = that commit's parent), the commit's diff applies as one patch revision, and `checks` are cleared. Rejects re-import before a commit/export, base drift, and empty commits. |
 | `coding_prepare_workspace` | write | ✓ | Run the session-configured preparation command (an argument vector in `preparation_recipes`, exactly like a check's `argv`) in the owned sandbox, certify the prepared Python interpreter and/or Node packages, and record preparation evidence. Verification prepares on demand, so call it directly only to pick among several recipes. |
-| `coding_verify` | write | ✓ | One-call verification: sync onto the upstream tip, prepare when stale, run the fix checks to a fixed point (at most 3 passes), then the verify checks in config order — skipping a check whose `needs` failed and reusing a pass whose `inputs` are unchanged. Every check runs through the bwrap owner's direct-write sandbox floor (no host fallback) and records the current revision and candidate-tree hash. A `verify` check that rewrites files fails and its edits are reverted. Reports one line per check plus failure excerpts. |
+| `coding_verify` | write | ✓ | One-call verification: sync onto the upstream tip, prepare when stale, run the fix checks to a fixed point (at most 3 passes), then the verify checks in config order — skipping a check whose `needs` failed and reusing a pass whose `inputs` are unchanged. Every check runs through the session's sandbox runner on a direct-write floor (no host fallback) and records the current revision and candidate-tree hash. A `verify` check that rewrites files fails and its edits are reverted. Reports one line per check plus failure excerpts. |
 | `coding_commit` | write | ✓ | Run the `coding_verify` pipeline for the required checks, then stage commit candidates and commit only if every required check passed for this revision and tree, on the owned unprotected branch; otherwise return the failing output. The message may be any length and span multiple lines. Committing clears pending `imported_commits` state (the imported content is carried by the commit). |
 | `coding_history` | write | ✓ | Slice and dice the owned branch's committed history: `tag`/`tag_delete` (owned commits only), `restore` (rewind to any existing tag's commit, including `<branch_prefix>ckpt/` checkpoints), `reword`, `squash` (fold owned commits into one; `target` keeps everything at or below it as a parent), or `rebase` (`--onto` a new base given as any Git revision — SHA or branch name — auto-abort on conflict; for deliberately moving to a different base — routine upstream sync is automatic). Every rewrite first tags a checkpoint; a rewrite that leaves the tree byte-identical keeps recorded checks, any content change clears them. Refuses rewrites of already-pushed commits; protected branches and the source checkout are untouchable. |
 | `coding_push` | external_write | ✓ | Push the checked feature branch upstream (`push_remote`). **No force option exists.** A successful push freezes the branch's history (rewrites and rewinds past the pushed revision are refused), so it prunes the artifact's now-dead `<branch_prefix>ckpt/` checkpoint tags and reports them as `pruned_checkpoint_tags`. |
@@ -200,13 +204,32 @@ worktree**; Git inspection is read-only and can target the configured source
 workspace or an owned worktree. Review operations never fetch or check out
 revisions.
 
-### Checks require bwrap
+### Checks require a sandbox runner (no pack is named)
 
-Each check argv runs through the bwrap owner's delegated `bwrap_run` binding.
-[verification.py](lisa_packs/coding/verification.py) requires a floor
-with `execution: sandbox`, `persistence: direct-write`, and an explicit `rw`
-grant covering the owned worktree. Missing authorization, a degraded sandbox,
-or a changed candidate tree fails the check without running it on the host.
+Each check argv runs through the session's **sandbox runner** — the
+provider-neutral `SandboxRunner` that the selected sandbox implementation
+declares (`ctx.sandbox_runner`, resolved from
+`providers.capabilities.sandbox`). [workflow.py](lisa_packs/coding/workflow.py)
+`run_contained()` builds one `SandboxRunRequest` from pack policy, dispatches
+to `runner.tool_id`, and lets `runner.interpret_result()` prove the
+containment. It never imports, names, or inspects a sandbox pack.
+
+The invariant is unchanged and platform-independent: the floor must be
+`execution: sandbox` with `persistence: direct-write`, the owned worktree must
+be inside an `rw` grant, and the result must prove containment — a missing
+runner, a missing grant, an unverifiable result, or a changed candidate tree
+fails the check **without** running it on the host.
+
+| Session | Runner tool | Containment evidence |
+| --- | --- | --- |
+| Linux + `lisa-pack-bwrap` | `bwrap_run` | namespace + path binds: `sandboxed`, `writable_paths`, `persistence`, `cwd` |
+| Windows + `lisa-pack-powershell` | `pwsh_argv_run` | Job Object assignment: `sandboxed`, `writable_paths`, `cwd` |
+
+Both are argv-only (no shell string crosses the boundary), both kill the
+process tree on timeout, and both refuse to report a result they cannot prove.
+A pack that declares no runner (or whose run tool failed to import) leaves
+`ctx.sandbox_runner` empty, and the check fails closed with a message naming
+the policy fix.
 
 ### Sandbox floor contribution (`lisa.extensions.sandbox_floors`)
 
@@ -239,13 +262,13 @@ def floor_contribution(pack_config, context):
     }
 ```
 
-The runtime merges this exclusively onto the harness-authored
-`lisa-pack-bwrap` floor at session assembly (see the
+The runtime merges this exclusively onto the harness-authored floor of
+whichever sandbox implementation the session selects (see the
 [harness pack authoring guide](https://github.com/Lisa-Harness/lisa/blob/main/docs/PACK_AUTHORING_GUIDE.md)
 and `kernel.sandbox_floor`), so the floor and the actual worktree location
 can never drift apart — the failure mode behind the 2026-10-14
-check abort ("bwrap sandbox floor does not permit worktree
-writes" after the data-dir switch). The contribution is derived from the
+check abort ("sandbox floor does not permit worktree writes" after the
+data-dir switch). The contribution is derived from the
 same `resolve_worktree_parent` the worktree tools use, so resolution changes
 flow into the floor automatically. Cache roots are detected from the
 *configured* check/recipe argv by whole-token match — a `uv` argv contributes
@@ -261,10 +284,11 @@ session needs the store specifically — pnpm materializes every package from
 its content store by hard link or copy, so an unwritable store fails the
 install outright (`ERR_PNPM_STORE_DIR_OPEN_OPERATION_LOCK`, os error 30)
 while a writable one that is *not* the host default silently relocates the
-store into the worktree. The bwrap owner normalizes
+store into the worktree. A namespace-style implementation (bwrap) normalizes
 `TMPDIR` to the namespace's writable `/tmp` (`--tmpfs /tmp`), so temp files
 never resolve through a masked or read-only host path: a preparation recipe
-needs no `env TMPDIR=` prefix. Network is deliberately *not* contributed:
+needs no `env TMPDIR=` prefix. The Job Object implementation has no namespace,
+so host temp paths are used as-is. Network is deliberately *not* contributed:
 whether a preparation recipe needs network is toolchain-dependent; a recipe
 that needs it under a `deny` floor fails at recipe time with a precise cause.
 
@@ -418,6 +442,47 @@ existence and writability: the pack's floor contribution grants
 floors that grant none — test harnesses, hand-authored floors, cold
 machines. For `uv sync` (preparation) keep the cache: installing is its job.
 
+### On Windows (the powershell sandbox)
+
+Bubblewrap is Linux-only, so a Windows session selects the powershell pack as
+the sandbox implementation instead. Nothing about this pack's configuration
+changes — the runner is resolved from the session, not named here:
+
+```yaml
+resources:
+  packs:
+    include:
+      - lisa-pack-coding
+      - lisa-pack-powershell
+    configuration:
+      lisa-pack-coding:
+        workspace_root: C:/Users/you/Code/my-project
+        worktree_dir: C:/Users/you/AppData/Local/lisa/git-worktrees
+        checks:
+          - id: test
+            argv: ["uv", "run", "--no-sync", "python", "-m", "pytest", "-q"]
+            timeout_seconds: 300
+        required_check_ids: [test]
+      lisa-pack-powershell:
+        sandbox:
+          floor:
+            execution: sandbox
+            persistence: direct-write
+            paths:
+              C:/Users/you/AppData/Local/lisa/git-worktrees: rw
+providers:
+  capabilities:
+    sandbox: lisa-pack-powershell   # selects the implementation owner
+```
+
+Job Objects are Windows' containment primitive: they control process lifetime
+and resource caps, not filesystem visibility. The floor validator therefore
+*rejects* axes it cannot enforce (`network`, `device`, `ipc`, tmpfs budgets,
+non-`rw` path access) instead of accepting a posture it would ignore — expect
+a load-time error naming the axis if you copy a Linux floor verbatim. Checks
+still run contained, still fail closed, and still prove their result via the
+runner's evidence block.
+
 ### With preparation (Python or Node)
 
 `checks` alone assume the workspace is already installable. A
@@ -560,6 +625,13 @@ calls; local Git and sandbox I/O — see [tests/evals/](lisa_packs/coding/tests/
 `lisa.extensions.host_commands` →
 `lisa_packs.coding.copilot_commands:get_host_commands`.
 
+[tests/test_sandbox_runner.py](lisa_packs/coding/tests/test_sandbox_runner.py)
+pins the provider-neutral containment contract: the same coding config is
+driven through a non-bwrap runner, a missing runner, and an unverifiable
+runner, so the pack's `bwrap`-independence is a regression test rather than a
+convention. The doubles live in
+[tests/runner_doubles.py](lisa_packs/coding/tests/runner_doubles.py).
+
 ### Repeatable Go workflow tests
 
 With the framework development environment, a sibling `lisa-packs/bwrap`
@@ -654,15 +726,18 @@ The four related packs form one pipeline with clean seams — and **no
 cross-imports** (the sdk/packs rule); they hand off only through typed code
 (artifact, tool registry, shared config key):
 
-- **bwrap** = containment *primitive* (how/where to run safely).
+- **bwrap** (Linux) / **powershell** (Windows) = containment *primitive*
+  (how/where to run safely).
 - **bash** = interactive execution *session* + the user-facing *approval
   boundary*.
 - **coding** (this) = Git *workflow* + durable *artifact ownership* (the unit
   of work).
 - **github** = *publication* of that artifact (push → PR).
 
-`coding_verify` doesn't import bwrap — it dispatches through the tool
-registry to `bwrap_run`. Ownership (`belongs_to`) and the artifact type live in
+`coding_verify` doesn't import a sandbox pack — it dispatches through the
+registry to whatever runner the session's sandbox implementation declares
+(`bwrap_run` on Linux, `pwsh_argv_run` on Windows). Ownership (`belongs_to`)
+and the artifact type live in
 the SDK so the github pack matches identity identically. The single
 `workspace_root` config key is the shared channel; only the strictness differs
 per pack.
@@ -674,9 +749,9 @@ per pack.
   Git-level) are separate. An overlay layer **cannot** become a `WorkProduct`;
   a patch verified under tmpfs scratch must be re-applied via
   `coding_apply_patch`. There's no bridge type in the kernel artifact — yet.
-- **Checks fail closed without authorized containment.** Missing bwrap,
-  insufficient worktree `rw` grants, or degraded sandbox evidence rejects the
-  check; no unchecked host execution is substituted.
+- **Checks fail closed without authorized containment.** No active sandbox
+  runner, insufficient worktree `rw` grants, or unverifiable containment
+  evidence rejects the check; no unchecked host execution is substituted.
 - **The model can't self-approve.** Approval lives in the host engine keyed off
   a containment fact the *pack reports* but the *host owns*; this pack never
   decides its own gate.

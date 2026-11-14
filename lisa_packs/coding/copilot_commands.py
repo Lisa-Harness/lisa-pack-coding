@@ -36,7 +36,7 @@ def _resolve_workspace_root(runtime: HostRuntime) -> Path:
 
     Reads the same ``workspace_root`` pack-config channel the tools use, then
     delegates the path handling to the shared ``sdk.workspace`` resolver so
-    expansion and the directory check match the bwrap/coding contract. Falls
+    expansion and the directory check match the shared pack contract. Falls
     back to the process CWD when no workspace is configured.
     """
     pack_config: dict = {}
@@ -89,8 +89,7 @@ def _stem_from_path(path: str) -> str:
     stem = PurePosixPath(path.replace("\\", "/")).stem
     # Strip known suffixes: .prompt, .agent, .instructions
     for suffix in (".prompt", ".agent", ".instructions"):
-        if stem.endswith(suffix):
-            stem = stem[: -len(suffix)]
+        stem = stem.removesuffix(suffix)
     return stem
 
 

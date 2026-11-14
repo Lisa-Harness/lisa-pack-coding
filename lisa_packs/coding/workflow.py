@@ -12,9 +12,14 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
 from kernel.models import ToolExecutionContext
+from kernel.sandbox_floor import (
+    SandboxExecutionEnvelope,
+    SandboxRunnerContractError,
+    SandboxRunRequest,
+)
 from sdk.workproducts import WorkProduct, WorkProductStore
 
 from lisa_packs.coding.config import (
@@ -54,7 +59,8 @@ __all__ = [
 _GIT_STATUS_PATH_OFFSET = 3
 # Upper bound on reaping and draining once a process group has been killed.
 _KILL_GRACE_SECONDS = 5.0
-# Upper bound bwrap_run accepts for its own timeout_seconds parameter. The
+# Upper bound any sandbox run tool accepts for its own timeout_seconds
+# parameter (both bwrap_run and pwsh_argv_run cap there). The
 # pack's config is stricter (checks and recipes cap at 1800s); forwarding the
 # configured value means a slow install is bounded by the session's own
 # policy rather than by an undocumented second cap.
@@ -236,84 +242,99 @@ async def run_contained(
     worktree: Path,
     timeout_seconds: int,
 ) -> ProcessResult:
-    """Run under the bwrap owner's verified direct-write worktree floor.
+    """Run an argv in ``worktree`` under the session's sandbox runner.
 
-    The configured ``timeout_seconds`` is forwarded as-is up to
-    :data:`_SANDBOX_TIMEOUT_CEILING_SECONDS`, the ceiling ``bwrap_run``
-    itself validates against. The pack's config already bounds every
-    recipe and check to 1800s, so a second, smaller cap here only turned
-    a slow-but-legitimate install into a spurious timeout — a cold pnpm
-    install of a large workspace is exactly that case.
+    Provider-neutral by design: the pack never names a sandbox tool. The
+    session's selected implementation supplies a
+    :class:`kernel.sandbox_floor.SandboxRunner`, which translates this
+    structured request into its own tool's parameters and verifies its own
+    containment evidence. Bubblewrap proves the run with a namespace plus
+    path binds; a Windows Job Object proves it with job assignment. Both
+    answer the same question, and neither can report success without proof.
+
+    What must hold on *every* implementation, because it is the reason this
+    function exists rather than calling ``run_process``:
+
+    - the floor is a real sandbox floor with direct writes, so a check's
+      ``fix`` edits land in the owned worktree instead of being discarded;
+    - the worktree itself is inside an ``rw`` grant, so the run can write
+      where it must;
+    - the result proves the requested containment — otherwise this raises
+      rather than substituting a host run.
+
+    The configured ``timeout_seconds`` is forwarded up to
+    :data:`_SANDBOX_TIMEOUT_CEILING_SECONDS`. The pack's config already
+    bounds every recipe and check to 1800s, so a second, smaller cap here
+    only turned a slow-but-legitimate install into a spurious timeout — a
+    cold pnpm install of a large workspace is exactly that case.
     """
 
+    runner = getattr(ctx, "sandbox_runner", None)
     dispatch = ctx.delegated_tool_dispatch
-    floor_for = ctx.execution_floor_for
-    floor = floor_for("bwrap_run") if floor_for is not None else None
-    if (
-        dispatch is None
-        or floor is None
-        or floor.execution != "sandbox"
-        or floor.persistence != "direct-write"
-    ):
+    if runner is None or dispatch is None:
         raise CodingWorkflowError(
-            "bwrap sandbox has no direct-write execution floor (found "
+            "no sandbox implementation is active for this session, so checks "
+            "cannot run contained. Enable a sandbox pack (bwrap on Linux, the "
+            "powershell pack on Windows) and select it with "
+            "providers.capabilities.sandbox; running checks on the host is not "
+            "an accepted substitute."
+        )
+    floor_for = ctx.execution_floor_for
+    floor = floor_for(runner.tool_id) if floor_for is not None else None
+    if floor is None or floor.execution != "sandbox" or floor.persistence != "direct-write":
+        raise CodingWorkflowError(
+            "the sandbox floor has no direct-write execution posture (found "
             f"execution={getattr(floor, 'execution', None)!r}, "
-            f"persistence={getattr(floor, 'persistence', None)!r}). Set "
-            "lisa-pack-bwrap sandbox.floor to execution: sandbox, persistence: direct-write."
+            f"persistence={getattr(floor, 'persistence', None)!r}). Set the sandbox "
+            "owner's floor to execution: sandbox, persistence: direct-write."
         )
     matching_paths = (
         (root, access)
         for path, access in floor.paths.items()
-        if (root := Path(path).expanduser().resolve()) == worktree
-        or worktree.is_relative_to(root)
+        if (root := Path(path).expanduser().resolve()) == worktree or worktree.is_relative_to(root)
     )
     nearest = max(matching_paths, key=lambda entry: len(entry[0].parts), default=None)
     if nearest is None or nearest[1] != "rw":
-        raise CodingWorkflowError(
-            "bwrap sandbox floor does not permit worktree writes."
-        )
-    # bwrap's policy join treats an unspecified request axis as the pack's
-    # restrictive default, so a floor allowance on network/device/ipc only
-    # takes effect when forwarded explicitly (2026-10-15: workspace
-    # preparation starved without the network the session floor granted).
-    overrides: dict[str, Any] = {
-        "persistence": "direct-write",
-        "paths": {str(worktree): "rw"},
-    }
-    for axis in ("network", "device", "ipc"):
-        value = getattr(floor, axis, None)
-        if value is not None:
-            overrides[axis] = value
-    tool_result = await dispatch(
-        "bwrap_run",
-        {
-            "argv": list(argv),
-            "cwd": str(worktree),
-            "overrides": overrides,
-            "timeout_seconds": min(timeout_seconds, _SANDBOX_TIMEOUT_CEILING_SECONDS),
-        },
+        raise CodingWorkflowError("the sandbox floor does not permit worktree writes.")
+    request = SandboxRunRequest(
+        argv=tuple(argv),
+        cwd=str(worktree),
+        timeout_seconds=min(timeout_seconds, _SANDBOX_TIMEOUT_CEILING_SECONDS),
+        # Direct writes are non-negotiable here: a `fix` check's edits must
+        # land in the owned worktree, and an ephemeral or overlay posture would
+        # report success while discarding them.
+        persistence="direct-write",
+        paths={str(worktree): "rw"},
+        # Several implementations treat an unspecified request axis as their
+        # own restrictive default, so a floor allowance on network/device/ipc
+        # only takes effect when forwarded explicitly (2026-10-15: workspace
+        # preparation starved without the network the session floor granted).
+        network=getattr(floor, "network", None),
+        device=getattr(floor, "device", None),
+        ipc=getattr(floor, "ipc", None),
     )
-    payload = dict(tool_result.output_json or {})
-    if tool_result.error:
-        raise CodingWorkflowError(f"bwrap sandbox failed: {tool_result.error}")
-    if (
-        payload.get("sandboxed") is not True
-        or payload.get("degraded")
-        or payload.get("persistence") != "direct-write"
-        or payload.get("cwd") != str(worktree)
-        or not isinstance(payload.get("writable_paths"), list)
-        or str(worktree) not in payload["writable_paths"]
-        or type(payload.get("return_code")) is not int
-    ):
-        raise CodingWorkflowError(
-            "bwrap sandbox did not verify the writable worktree check."
-        )
+    try:
+        parameters = runner.build_request(request, floor=floor)
+    except SandboxRunnerContractError as exc:
+        raise CodingWorkflowError(str(exc)) from exc
+    tool_result = await dispatch(runner.tool_id, dict(parameters))
+    envelope = SandboxExecutionEnvelope(
+        output_text=tool_result.output_text or "",
+        output_json=dict(tool_result.output_json or {}),
+        error=tool_result.error or "",
+    )
+    try:
+        result = runner.interpret_result(request, envelope)
+    except SandboxRunnerContractError as exc:
+        # Name the failure as a sandbox failure, not a check failure: the
+        # check never ran, and the operator's fix is the containment policy.
+        raise CodingWorkflowError(f"sandbox runner rejected the run: {exc}") from exc
     return ProcessResult(
-        return_code=int(payload["return_code"]),
-        stdout=tool_result.output_text or "",
-        stderr=str(payload.get("stderr", "")),
-        timed_out=bool(payload.get("timed_out", False)),
-        output_truncated=bool(payload.get("truncated", False)),
+        return_code=result.return_code,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        timed_out=result.timed_out,
+        output_truncated=result.output_truncated,
     )
 
 

@@ -2,20 +2,20 @@
 
 See :mod:`lisa_packs.coding.verification` for the pipeline: upstream sync,
 on-demand preparation, fix checks to a fixed point, then verify checks with
-``needs`` ordering and ``inputs``-based reuse. Every check runs through
-``bwrap_run``; an unavailable or degraded sandbox fails the check rather than
+``needs`` ordering and ``inputs``-based reuse. Every check runs through the
+session's sandbox runner (whatever implementation the session selected); an
+absent, unavailable, or unverifiable sandbox fails the check rather than
 running it on the host.
 """
 
 from __future__ import annotations
 
 from kernel.models import ToolExecutionContext, ToolResult
-from pydantic import BaseModel, Field
-
 from lisa_packs.coding.config import get_coding_config
 from lisa_packs.coding.freshness import with_sync_note
 from lisa_packs.coding.verification import VerificationAborted, verify_artifact
 from lisa_packs.coding.workflow import CodingWorkflowError, load_owned_artifact
+from pydantic import BaseModel, Field
 
 TOOL_ID = "coding_verify"
 
@@ -53,5 +53,7 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
     return ToolResult(
         tool_id=TOOL_ID,
         output_text=report.text(revision=artifact.revision),
+        # Every check in this report ran through a verified sandbox runner;
+        # an unverified run raises instead of reaching this line.
         output_json={**report.to_json(artifact=artifact), "sandboxed": True},
     )

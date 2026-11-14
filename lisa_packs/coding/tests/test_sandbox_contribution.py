@@ -200,3 +200,28 @@ async def test_contribution_rejects_invalid_pack_config(tmp_path: Path) -> None:
     # the config error, not paper over it.
     with pytest.raises(Exception):  # noqa: B017 - config error type is pack-internal
         floor_contribution({}, {"data_dir": str(tmp_path)})
+
+
+@pytest.mark.asyncio
+async def test_contribution_names_only_axes_every_implementation_can_enforce(
+    tmp_path: Path,
+) -> None:
+    """The contribution must be portable across sandbox implementations.
+
+    It is merged onto whichever implementation the session selects, and each
+    implementation validates what it can enforce. Naming a namespace-era axis
+    here (``network``/``device``/``ipc``) would reject the pack load on a
+    Windows Job Object sandbox; the contribution deliberately names only the
+    posture every implementation can honour.
+    """
+    (tmp_path / "t").mkdir(parents=True, exist_ok=True)
+    repo = await git_repo(tmp_path / "t")
+    contribution = floor_contribution(
+        {"workspace_root": str(repo.root)},
+        {"data_dir": str(tmp_path / "data"), "workspace_root": str(repo.root)},
+    )
+    assert contribution is not None
+    assert set(contribution) == {"execution", "persistence", "paths"}
+    assert contribution["execution"] == "sandbox"
+    assert contribution["persistence"] == "direct-write"
+    assert set(contribution["paths"].values()) == {"rw"}

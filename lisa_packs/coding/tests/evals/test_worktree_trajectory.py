@@ -20,14 +20,14 @@ from pathlib import Path
 import pytest
 from kernel.capability_binding import ExecutionFloorView
 from kernel.models import ToolResult
+from lisa_packs.coding.config import get_coding_config
+from lisa_packs.coding.tests.runner_doubles import DirectWriteRunner, UnverifiedRunner
+from lisa_packs.coding.workflow import run_git
 from packstest.catalog import build_tool_catalog
 from packstest.context import ToolContextFactory
 from packstest.git import GitRepoFixture, git_repo
 from packstest.report import Trajectory, write_trajectory
 from packstest.runner import ToolRun, run_tool
-
-from lisa_packs.coding.config import get_coding_config
-from lisa_packs.coding.workflow import run_git
 
 PACK_PATH = Path(__file__).resolve().parents[4]
 SHA1_HEX_LENGTH = 40
@@ -54,9 +54,10 @@ def _verified_sandbox(factory: ToolContextFactory) -> None:
         persistence="direct-write",
         paths={str(factory.root.parent): "rw"},
     )
+    factory.sandbox_runner = DirectWriteRunner()
 
     async def dispatch(tool_id: str, parameters: Mapping[str, object]) -> ToolResult:
-        assert tool_id == "bwrap_run"
+        assert tool_id == DirectWriteRunner().tool_id
         assert parameters["argv"] == ["true"]
         worktree = str(parameters["cwd"])
         assert parameters["overrides"] == {
@@ -122,6 +123,7 @@ def _real_sandbox(
         persistence="direct-write",
         paths=paths,
     )
+    factory.sandbox_runner = DirectWriteRunner()
     bwrap_catalog = build_tool_catalog(bwrap_path)
     bwrap_factory = ToolContextFactory(
         root=factory.root,
@@ -1570,6 +1572,7 @@ async def test_required_check_rejects_restricted_worktree_floor(
         persistence="direct-write",
         paths={str(repo.root.parent): "rw", worktree: "ro"},
     )
+    factory.sandbox_runner = DirectWriteRunner()
 
     async def forbidden_dispatch(_tool_id: str, _parameters: Mapping[str, object]) -> ToolResult:
         raise AssertionError("the restricted worktree must not be dispatched")
@@ -1739,6 +1742,9 @@ async def test_required_check_rejects_unverified_sandbox_result(
         persistence="direct-write",
         paths={str(repo.root.parent): "rw"},
     )
+    # A real runner rejects these payloads; the double does the same so the
+    # eval covers the consumer's fail-closed behavior, not bwrap's.
+    factory.sandbox_runner = UnverifiedRunner()
     factory.delegated_tool_dispatch = fake_sandbox
 
     checked = await run_tool(

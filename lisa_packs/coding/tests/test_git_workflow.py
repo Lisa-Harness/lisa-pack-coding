@@ -33,6 +33,7 @@ from lisa_packs.coding.config import (
     CodingPreparationRecipe,
     get_coding_config,
 )
+from lisa_packs.coding.tests.runner_doubles import DirectWriteRunner
 from lisa_packs.coding.tools.apply_patch.apply_patch import execute as apply_patch
 from lisa_packs.coding.tools.cleanup_worktree.cleanup_worktree import (
     execute as cleanup_worktree,
@@ -67,9 +68,9 @@ from lisa_packs.coding.tools.prepare_workspace.prepare_workspace import (
 )
 from lisa_packs.coding.tools.push.push import execute as push
 from lisa_packs.coding.tools.read_file.read_file import execute as read_file
-from lisa_packs.coding.tools.verify.verify import execute as verify
 from lisa_packs.coding.tools.search_code.search_code import execute as search_code
 from lisa_packs.coding.tools.status.status import execute as status
+from lisa_packs.coding.tools.verify.verify import execute as verify
 from lisa_packs.coding.workflow import (
     ProcessResult,
     dependency_manifest_digest,
@@ -128,7 +129,7 @@ def _context(
     task_id: str = "",
 ) -> ToolExecutionContext:
     async def dispatch(tool_id: str, parameters: Mapping[str, object]) -> ToolResult:
-        assert tool_id == "bwrap_run"
+        assert tool_id == DirectWriteRunner().tool_id
         worktree = str(parameters["cwd"])
         if sandbox_effect is not None:
             sandbox_effect(Path(worktree))
@@ -159,6 +160,7 @@ def _context(
         execution_floor_for=lambda _tool_id: ExecutionFloorView(
             execution="sandbox", persistence="direct-write", paths={str(root.parent): "rw"}
         ),
+        sandbox_runner=DirectWriteRunner(),
         delegated_tool_dispatch=dispatch,
         code_change_artifact_store=store,
         data_dir=str(root.parent / "data"),
@@ -2432,6 +2434,7 @@ async def test_live_bwrap_check_certifies_only_the_owned_worktree(tmp_path: Path
     factory.execution_floor_for = lambda _tool_id: ExecutionFloorView(
         execution="sandbox", persistence="direct-write", paths={str(repo.root.parent): "rw"}
     )
+    factory.sandbox_runner = DirectWriteRunner()
     bwrap_factory = ToolContextFactory(
         root=repo.root,
         pack_config={
