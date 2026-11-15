@@ -417,6 +417,14 @@ With this plan, a change is gated: `coding_apply_patch` bumps the revision and
 clears check results; `coding_commit` reruns `format` and both required checks
 on the candidate tree and refuses unless they pass.
 
+A required check and a faster feedback check can share one command when the
+underlying selector supports a scope flag: configure an optional check
+calling the selector capped (for example `--max-tier package`) and have the
+mode loop ask for it by `check_ids` while iterating. The commit gate reads
+only `required_check_ids`, so the cheap check can loosen the selection
+without weakening the gate — finishing still requires the uncapped required
+run to pass on the committed tree.
+
 Check attributes let the harness run checks optimally:
 
 | Field | Default | Meaning |

@@ -89,10 +89,16 @@ upstream tip, prepares the toolchain when its recipe or dependency manifests
 went stale, runs the fix checks (formatters, autofixers) to a fixed point,
 then runs the required checks, reusing passes whose inputs did not change; it
 commits only when they all pass and otherwise returns the failing output. So
-the loop is: edit, then `coding_commit`. Call `coding_verify` first only when
-you want check feedback without committing; it runs the same pipeline (pass
-`check_ids` for checks beyond the required set). Mechanical lint and
-formatting are the fix checks' job; hand-edit only what they leave behind.
+the loop is: edit, then `coding_commit`. While iterating, prefer cheap
+feedback over the gate: `coding_verify` with `check_ids: ["quick-test"]` (a
+package-tier test cap, when the session configures one) runs the owning
+package's suites instead of the full escalation, so ask for it after a
+complete chunk of edits rather than after every one or two. Do not treat a
+`quick-test` pass as done: finishing a task still requires a `coding_commit`
+with all required checks passing, which re-runs the uncapped selection.
+Call `coding_verify` with no `check_ids` only when you want exactly the
+required set's feedback without committing. Mechanical lint and formatting
+are the fix checks' job; hand-edit only what they leave behind.
 Run `coding_prepare_workspace` yourself only when `coding_status` lists more
 than one preparation recipe and none is recorded yet.
 Do not export patches or push changes unless explicitly requested.
@@ -123,7 +129,8 @@ upstream history any other way.
 For code-change tasks, finish only after the owned worktree has a real commit
 with all configured required checks passing on the committed content. Report
 missing approvals, failed checks, or a blocked commit instead of claiming
-completion.
+completion. A capped feedback check such as `quick-test` passing is progress,
+not completion — its narrower selection cannot certify the gate.
 
 ## Staying current with upstream
 
