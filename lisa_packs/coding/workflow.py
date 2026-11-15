@@ -51,6 +51,7 @@ __all__ = [
     "run_contained",
     "run_git",
     "run_process",
+    "stageable_paths",
     "tree_changes",
     "validate_artifact_id",
     "worktree_tree_sha",
@@ -452,6 +453,72 @@ async def run_git(
     )
 
 
+def _existing_worktree_paths(worktree: Path, paths: Sequence[str]) -> list[str]:
+    """Paths still present in the worktree, symlinks included.
+
+    A tracked file that a task deleted, or a junk path whose bookkeeping entry
+    outlived the file, matches nothing once it is gone; staging such a path
+    fataled with ``pathspec did not match`` and wedged the pipeline. Broken
+    symlinks fail ``exists`` yet are still stageable, so they count here.
+    """
+
+    return [
+        path
+        for path in paths
+        if (worktree / path).exists() or (worktree / path).is_symlink()
+    ]
+
+
+async def stageable_paths(
+    worktree: Path, *, config: CodingPackConfig, paths: Sequence[str]
+) -> list[str]:
+    """Bookkeeping paths Git can still name for staging or hashing.
+
+    A path survives when it exists in the worktree (content or symlink, even a
+    broken one) or is tracked in HEAD, so a task's tracked-file deletion stays
+    stageable, while entries that can no longer match anything (junk paths
+    never tracked, index-only files deleted before a commit) are dropped
+    instead of fataled on.
+    """
+
+    tracked = set(await _head_paths(worktree, config=config, paths=paths))
+    return [
+        path
+        for path in paths
+        if path in tracked
+        or (worktree / path).exists()
+        or (worktree / path).is_symlink()
+    ]
+
+
+async def _head_paths(
+    worktree: Path, *, config: CodingPackConfig, paths: Sequence[str]
+) -> list[str]:
+    """Paths among ``paths`` that HEAD's tree still holds."""
+
+    if not paths:
+        return []
+    result = await run_git(
+        worktree,
+        ("--literal-pathspecs", "ls-tree", "-z", "--name-only", "HEAD", "--", *paths),
+        config=config,
+    )
+    if result.return_code != 0:
+        return []
+    return result.stdout.split("\0")[:-1]
+
+
+async def _head_tree_sha(worktree: Path, *, config: CodingPackConfig) -> str:
+    """HEAD's tree without staging anything (no paths remain stageable)."""
+
+    result = await run_git(worktree, ("rev-parse", "HEAD^{tree}"), config=config)
+    if result.return_code != 0:
+        raise CodingWorkflowError(
+            result.stderr.strip() or "Cannot resolve HEAD's Git tree."
+        )
+    return result.stdout.strip()
+
+
 async def candidate_tree_sha(
     worktree: Path,
     *,
@@ -462,9 +529,18 @@ async def candidate_tree_sha(
 
     When ``paths`` is provided, only those task-owned paths enter the tree;
     check byproducts and unrelated worktree edits cannot certify or alter a
-    coding artifact's commit.
+    coding artifact's commit. Bookkeeping entries whose paths are gone from
+    both the worktree and HEAD (a junk path whose edit batch never tracked it,
+    an index-only file later deleted) cannot stage into any tree and are
+    dropped, while the deletion of a tracked file still lands in the tree.
     """
     add_paths = list(paths) if paths else ["."]
+    if add_paths != ["."]:
+        add_paths = await stageable_paths(worktree, config=config, paths=add_paths)
+        if not add_paths:
+            # Nothing the bookkeeping names is stageable; the candidate tree
+            # is exactly HEAD's.
+            return await _head_tree_sha(worktree, config=config)
     return await _hash_tree(
         worktree,
         config=config,
@@ -479,10 +555,15 @@ async def worktree_tree_sha(
 
     Comparing this before and after a check reveals which real files the check
     rewrote, while caches and build output it leaves behind stay invisible.
+    The ``paths`` add runs after ``add -u`` has already staged tracked
+    deletions, so a path deleted from the worktree must not be named there:
+    Git would fail with ``pathspec did not match`` because neither the index
+    nor the disk holds it anymore.
     """
     adds: list[tuple[str, ...]] = [("add", "-u")]
-    if paths:
-        adds.append(("--literal-pathspecs", "add", "-A", "--", *paths))
+    existing = _existing_worktree_paths(worktree, paths)
+    if existing:
+        adds.append(("--literal-pathspecs", "add", "-A", "--", *existing))
     return await _hash_tree(worktree, config=config, adds=adds)
 
 

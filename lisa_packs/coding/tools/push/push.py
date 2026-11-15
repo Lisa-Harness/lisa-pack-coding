@@ -15,6 +15,7 @@ from lisa_packs.coding.workflow import (
     load_owned_artifact,
     prune_checkpoint_tags,
     run_git,
+    stageable_paths,
 )
 
 TOOL_ID = "coding_push"
@@ -43,7 +44,9 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
         if not artifact_branch_is_allowed(artifact, config):
             raise CodingWorkflowError("Artifact branch is not an owned unprotected feature branch.")
         worktree = artifact_worktree(artifact, config=config)
-        paths = list(dict.fromkeys(artifact.changed_paths))
+        paths = await stageable_paths(
+            worktree, config=config, paths=dict.fromkeys(artifact.changed_paths)
+        )
         if not paths:
             raise CodingWorkflowError(
                 "Artifact has no task-owned changed paths to verify."

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import sys
 from pathlib import Path
 
@@ -17,6 +19,7 @@ from lisa_packs.coding.tools.commit.commit import execute as commit
 from lisa_packs.coding.tools.create_worktree.create_worktree import (
     execute as create_worktree,
 )
+from lisa_packs.coding.tools.edit_files.edit_files import execute as edit_files
 from lisa_packs.coding.tools.verify.verify import execute as verify
 from lisa_packs.coding.verification import input_matches
 
@@ -310,3 +313,193 @@ async def test_create_worktree_branches_from_configured_base_branch(tmp_path: Pa
     assert created.error == "", created.error
     worktree = Path(str(created.output_json["worktree_path"]))
     assert not (worktree / "feature.txt").exists()
+
+
+async def _verified(
+    root: Path,
+    store: MemoryWorkProductStore,
+    artifact_id: str,
+) -> ToolResult:
+    report = await verify(
+        _context(
+            root,
+            store,
+            {"artifact_id": artifact_id},
+            checks=[_check("unit")],
+            required_check_ids=["unit"],
+        )
+    )
+    assert report.error == "", report.error
+    return report
+
+
+async def _git_ls_tree(worktree: Path, commit_sha: str) -> set[str]:
+    """Every path in the worktree's commit tree (recursive, NUL-separated)."""
+
+    process = await asyncio.create_subprocess_exec(
+        "git",
+        "--literal-pathspecs",
+        "ls-tree",
+        "-r",
+        "-z",
+        "--name-only",
+        commit_sha,
+        cwd=str(worktree),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
+    assert process.returncode == 0, stderr.decode("utf-8", errors="replace")
+    return set(stdout.decode("utf-8").split("\0")) - {""}
+
+
+@pytest.mark.asyncio
+async def test_deleted_tracked_file_commits_and_verifies(tmp_path: Path) -> None:
+    """A tracked file deleted from the worktree must not wedge the pipeline.
+
+    Deleting a file the artifact tracks (or commits) used to fatal every later
+    verify and commit with ``pathspec '<path>' did not match any files``; the
+    tree hashing now stages the deletion instead. The recorded changed path
+    also feeds the candidate tree, so committing carries the deletion.
+    """
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    artifact_id, worktree = await _patched(root, store, [_check("unit")])
+
+    deleted = await edit_files(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "edits": [
+                    {
+                        "kind": "delete",
+                        "path": "app.txt",
+                        "expected_sha256": hashlib.sha256(b"hello world\n").hexdigest(),
+                    }
+                ],
+            },
+        )
+    )
+    assert deleted.error == "", deleted.error
+    assert not (worktree / "app.txt").exists()
+
+    report = await _verified(root, store, artifact_id)
+    assert report.output_json["ready_to_commit"] is True
+
+    committed = await commit(
+        _context(root, store, {"artifact_id": artifact_id, "message": "Delete app.txt"})
+    )
+    assert committed.error == "", committed.error
+    after = await store.get(artifact_id)
+    assert after is not None
+    # HEAD's tree no longer holds the deleted file.
+    listing = await _git_ls_tree(worktree, after.commit_sha)
+    assert "app.txt" not in listing
+    assert deleted.output_json["changed_paths"] == ["app.txt"]
+
+
+@pytest.mark.asyncio
+async def test_deleted_tracked_file_keeps_checks_reusable(tmp_path: Path) -> None:
+    """Verify-then-verify with no file changes between the two still reuses."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    artifact_id, _worktree = await _patched(root, store, [_check("unit")])
+    deleted = await edit_files(
+        _context(
+            root,
+            store,
+            {
+                "artifact_id": artifact_id,
+                "edits": [
+                    {
+                        "kind": "delete",
+                        "path": "app.txt",
+                        "expected_sha256": hashlib.sha256(b"hello world\n").hexdigest(),
+                    }
+                ],
+            },
+        )
+    )
+    assert deleted.error == "", deleted.error
+    counter = _Counter()
+    first = await verify(
+        _context(
+            root, store, {"artifact_id": artifact_id}, checks=[_check("unit")],
+            required_check_ids=["unit"], sandbox_effect=counter,
+        )
+    )
+    assert first.error == "", first.error
+    second = await verify(
+        _context(
+            root, store, {"artifact_id": artifact_id}, checks=[_check("unit")],
+            required_check_ids=["unit"], sandbox_effect=counter,
+        )
+    )
+    assert second.error == "", second.error
+    # Both runs hashed the tree without dying, and the unchanged tree let the
+    # check record carry over.
+    reused = [item["reused"] for item in second.output_json["checks"]]
+    assert reused == [True]
+
+
+@pytest.mark.asyncio
+async def test_forgotten_recorded_path_dropped_from_commit(tmp_path: Path) -> None:
+    """A junk path that vanished from disk cannot fatal the commit's staging.
+
+    An artifact's recorded changed paths can name a file that never entered
+    Git (a rejected batch's leftover) and was then deleted from the worktree;
+    staging it used to fatal with ``pathspec did not match``. The commit now
+    drops such paths and lands what remains.
+    """
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    artifact_id, worktree = await _patched(root, store, [_check("unit")])
+    assert artifact_id
+    junk = worktree / "junk inert.txt"
+    junk.write_text("junk\n", encoding="utf-8")
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    # Record the junk path exactly like a stale bookkeeping entry would.
+    artifact.changed_paths = list(dict.fromkeys([*artifact.changed_paths, "junk inert.txt"]))
+    await store.save(artifact)
+    junk.unlink()
+
+    committed = await commit(
+        _context(root, store, {"artifact_id": artifact_id, "message": "Real change"})
+    )
+    assert committed.error == "", committed.error
+    after = await store.get(artifact_id)
+    assert after is not None
+    # HEAD carries the real change and not the vanished junk path.
+    listing = await _git_ls_tree(worktree, after.commit_sha)
+    assert "app.txt" in listing
+    assert "junk inert.txt" not in listing
+
+
+@pytest.mark.asyncio
+async def test_commit_without_stageable_paths_is_refused(tmp_path: Path) -> None:
+    """Only vanished paths remain: refuse with guidance instead of failing."""
+
+    root = await _repository(tmp_path)
+    store = MemoryWorkProductStore()
+    artifact_id, worktree = await _patched(root, store, [_check("unit")])
+    assert artifact_id
+    junk = worktree / "junk only.txt"
+    junk.write_text("junk\n", encoding="utf-8")
+    artifact = await store.get(artifact_id)
+    assert artifact is not None
+    artifact.changed_paths = ["junk only.txt"]
+    await store.save(artifact)
+    junk.unlink()
+
+    committed = await commit(
+        _context(root, store, {"artifact_id": artifact_id, "message": "Nothing left"})
+    )
+    assert committed.error != ""
+    assert "none of the artifact's recorded paths" in committed.error
+    assert "pathspec" not in committed.error

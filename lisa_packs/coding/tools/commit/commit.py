@@ -23,6 +23,7 @@ from lisa_packs.coding.workflow import (
     candidate_tree_sha,
     load_owned_artifact,
     run_git,
+    stageable_paths,
 )
 
 TOOL_ID = "coding_commit"
@@ -87,7 +88,14 @@ async def execute(ctx: ToolExecutionContext) -> ToolResult:
             raise CodingWorkflowError("Artifact has no task-owned changed paths to commit.")
         report = await verify_artifact(ctx, artifact, config=config)
         sync = report.sync
-        paths = list(dict.fromkeys(artifact.changed_paths))
+        paths = await stageable_paths(
+            worktree, config=config, paths=dict.fromkeys(artifact.changed_paths)
+        )
+        if not paths:
+            raise CodingWorkflowError(
+                "Not committed: none of the artifact's recorded paths can be "
+                "staged anymore; run coding_verify to rebuild bookkeeping."
+            )
         candidate_tree = await candidate_tree_sha(worktree, config=config, paths=paths)
         if not artifact_has_current_required_checks(artifact, candidate_tree=candidate_tree):
             raise CodingWorkflowError(
