@@ -149,10 +149,19 @@ def test_edit_descriptions_prefer_original_snapshot_replacements() -> None:
     tools, _ = _catalog()
 
     description = tools["coding_edit_files"]["description"]
-    assert "preferred edit tool" in description
-    assert "original file snapshot" in description
-    assert "must not overlap" in description
+    # Shape-first compact contract (coding-edit-schema-recovery): each kind's
+    # fields, the digest provenance, and the array-not-string rule.
+    assert "complete current-file SHA-256" in description
+    assert "matches exactly once" in description
+    assert "never a string" in description
     assert "Prefer coding_edit_files" in tools["coding_apply_patch"]["description"]
+
+
+def test_edit_files_declares_validation_recovery_content() -> None:
+    tools, _ = _catalog()
+
+    declaration = tools["coding_edit_files"].get("validation_recovery")
+    assert declaration == {"content_path": "tools/edit_files/recovery.md"}
 
 
 def test_modes_route_by_mode_id() -> None:

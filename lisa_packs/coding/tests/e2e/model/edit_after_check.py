@@ -1,4 +1,4 @@
-"""Scripted model for edit_after_check.scenario.yml (see e2etest.scripted).
+"""Scripted model for edit_after_check.scenario.yml (see runtime.testing.scripted).
 
 Replays the live sequence that stalled: worktree, status, check, read, an
 edit with a stale digest, reread, the real edit, the check again, then a
@@ -8,7 +8,7 @@ step reads ids and digests from the previous real tool results.
 
 from __future__ import annotations
 
-from e2etest.scripted import Reply, ScriptError, ScriptTurn
+from runtime.testing.scripted import Reply, ScriptError, ScriptTurn
 
 _STALE_SHA = "0" * 64
 _BUG = "return total(values) / (len(values) - 1)"

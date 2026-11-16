@@ -1,4 +1,4 @@
-"""Scripted model for history_fold.scenario.yml (see e2etest.scripted).
+"""Scripted model for history_fold.scenario.yml (see runtime.testing.scripted).
 
 Worktree, status, read, reread (supersedes the first read), edit with the
 reread's digest (invalidates the reread and the status), verify, commit
@@ -8,7 +8,7 @@ cap. Ids and digests come from the real tool results.
 
 from __future__ import annotations
 
-from e2etest.scripted import Reply, ScriptError, ScriptTurn
+from runtime.testing.scripted import Reply, ScriptError, ScriptTurn
 
 _BUG = "return total(values) / (len(values) - 1)"
 _FIX = "return total(values) / len(values)"

@@ -1,0 +1,57 @@
+# Opt-in live scenario for the coding pack's edit-schema recovery: a real
+# model is told to fix a bug but must first send a deliberately malformed
+# edit batch (the prompt dictates the exact malformed shape), recover from
+# the rejection per the tool's authored recovery text, and land the corrected
+# edit with an UPPERCASE digest. Oracles prove from evidence: the ledger
+# carries the pre-execution rejection row, exactly one write receipt exists,
+# and the committed diff touches only the target file.
+#
+# Live models vary: a provider that garbles arguments (the 2026-10-14
+# glm-5.3:cloud family) may fail the malformed-first instruction by never
+# sending a well-formed batch after the deliberate rejection; the verdict
+# documents provider-specific remaining failure without loosening the
+# deterministic packstest/e2e-scripted assertions.
+#
+# Run: uv run lisa-e2e run <this file>   (from the lisa framework checkout)
+id: coding/edit-recovery-live
+session_context: session_context.md
+fixture:
+  repo: fixtures/stats
+policy: policy_allow_coding.yaml
+packs:
+  - lisa-pack-bash
+  - lisa-pack-bwrap
+  - lisa-pack-coding
+  - lisa-pack-markdown
+  - lisa-pack-personas
+turns:
+  - >-
+    Fix the off-by-one bug in stats.mean in an isolated worktree, with one
+    deliberate detour: your FIRST coding_edit_files call must send "edits"
+    as a single JSON object (not an array) — the exact malformed shape I am
+    asking for, so we can observe the tool's rejection. Then follow the
+    rejection text to send the corrected batch. For the corrected call,
+    uppercase the expected_sha256 digest. Finish by running the required
+    checks and committing.
+approvals:
+  approve: ["*"]
+  deny: [coding_push, coding_cleanup_worktree]
+budgets:
+  max_messages: 10
+  max_continues: 2
+  max_yield_replies: 1
+  wall_clock_s: 1800
+oracles:
+  hygiene:
+    - not_aborted: {}
+    - no_turn_errors: {}
+    - no_runtime_errors: {}
+    - max_exchanges: {n: 10}
+  rejection:
+    - ledger_error: {target: coding_edit_files, min: 1}
+    - ledger_contains: {text: "must be one JSON array of edit records"}
+    - receipt: {capability: coding_edit_files}
+  edit:
+    - diff_touches: {paths: [stats.py], exact: true}
+    - checks_current: {}
+    - worktree_clean: {}

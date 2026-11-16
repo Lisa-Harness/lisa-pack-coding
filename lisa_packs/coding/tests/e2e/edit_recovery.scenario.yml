@@ -1,0 +1,48 @@
+# Deterministic, token-free check of the coding pack's edit-schema recovery:
+# the model first sends a malformed edit batch (object-typed edits), the
+# kernel's validation-recovery hook rejects it pre-execution with the authored
+# recovery text and no write happens; the model then reads the file fresh and
+# applies the corrected edit with an UPPERCASE digest (case normalization),
+# and commits. The ledger proves the rejection was recorded as dispatch
+# telemetry with the recovery text; Git proves the committed diff comes only
+# from the corrected call. The model is model/edit_recovery.py, not an LLM.
+# Run: uv run --frozen lisa-e2e run <this file>   (from the lisa framework checkout)
+id: coding/edit-recovery-scripted
+session_context: session_context.md
+fixture:
+  repo: fixtures/stats
+policy: policy_allow_coding.yaml
+model:
+  script: model/edit_recovery.py
+packs:
+  - lisa-pack-bash
+  - lisa-pack-bwrap
+  - lisa-pack-coding
+  - lisa-pack-markdown
+  - lisa-pack-personas
+turns:
+  - Fix the off-by-one in stats.mean in an isolated worktree; the first edit attempt will be malformed on purpose so you can recover from its rejection.
+approvals:
+  approve: ["*"]
+  deny: [coding_push, coding_cleanup_worktree]
+budgets:
+  max_messages: 8
+  max_continues: 0
+  max_yield_replies: 0
+  wall_clock_s: 300
+oracles:
+  hygiene:
+    - not_aborted: {}
+    - no_turn_errors: {}
+    - no_runtime_errors: {}
+    - max_exchanges: {n: 8}
+  rejection:
+    # The malformed dispatch was recorded as an error row with the authored
+    # recovery text — the rejected call is ledger evidence.
+    - ledger_error: {target: coding_edit_files, min: 1}
+    - ledger_contains: {text: "must be one JSON array of edit records"}
+    # Exactly one write receipt: the rejected attempt minted no write effect.
+    - receipt: {capability: coding_edit_files}
+  edit:
+    - diff_touches: {paths: [stats.py], exact: true}
+    - worktree_clean: {}

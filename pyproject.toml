@@ -7,7 +7,7 @@ where = ["."]
 include = ["lisa_packs*", "lisa_packs.coding*"]
 
 [tool.setuptools.package-data]
-"lisa_packs.coding" = ["modes/**/*.md", "tools/**/*.yml"]
+"lisa_packs.coding" = ["modes/**/*.md", "tools/**/*.yml", "tools/**/*.md"]
 
 [project]
 name = "lisa-pack-coding"

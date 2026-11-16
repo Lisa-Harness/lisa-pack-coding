@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
@@ -12,15 +13,6 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from kernel.models import ToolExecutionContext, ToolResult
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    ValidationError,
-    field_validator,
-    model_validator,
-)
-
 from lisa_packs.coding.config import CodingPackConfig, get_coding_config
 from lisa_packs.coding.freshness import SyncOutcome, sync_and_save, with_sync_note
 from lisa_packs.coding.local_files import (
@@ -34,8 +26,37 @@ from lisa_packs.coding.workflow import (
     load_owned_artifact,
     run_git,
 )
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 TOOL_ID = "coding_edit_files"
+
+#: Authored recovery content shipped beside this module (see ``edit_files.tool.yml``
+#: ``validation_recovery.content_path``). Keyed sections are rendered by the
+#: kernel's validation-recovery hook; this module owns only classification.
+RECOVERY_CONTENT_PATH = "tools/edit_files/recovery.md"
+
+#: Recovery keys declared in ``recovery.md``; the classifier maps a pydantic
+#: ``ValidationError`` onto exactly one of them.
+RECOVERY_KEYS = frozenset(
+    {
+        "edits_not_array",
+        "record_shape",
+        "digest_format",
+        "replacement_shape",
+        "missing_required",
+        "unknown_or_other",
+    }
+)
+
+#: A complete-file SHA-256 digest in either case (normalization gate).
+_HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 class _JsonTailState:
@@ -318,6 +339,21 @@ class FileEdit(BaseModel):
     replacements: list[Replacement] = Field(default_factory=list[Replacement], max_length=50)
     content: str | None = Field(default=None, max_length=500_000)
 
+    @field_validator("expected_sha256", mode="before")
+    @classmethod
+    def _normalize_digest_case(cls, value: object) -> object:
+        """Lowercase a 64-hex digest; every other value passes through.
+
+        Uppercase and mixed-case spellings denote the same digest, so a
+        case-only rewrite cannot invent a match. Nothing is trimmed,
+        repaired, or inferred: a short, padded, or non-hex value reaches the
+        pattern validator unchanged so the rejection still names it.
+        """
+
+        if isinstance(value, str) and len(value) == 64 and _HEX64.fullmatch(value):
+            return value.lower()
+        return value
+
     @model_validator(mode="after")
     def _validate_shape(self) -> FileEdit:
         if self.kind == "update":
@@ -374,6 +410,73 @@ class Parameters(BaseModel):
         if isinstance(data, Mapping):
             return _maybe_lift_flat_string_edits(data)
         return data
+
+
+def _loc_prefix(error: Any) -> tuple[str, ...]:
+    """Return one error's ``loc`` as a plain string tuple."""
+
+    return tuple(str(part) for part in error.get("loc", ()))
+
+
+def validation_recovery_key(exc: BaseException) -> str:
+    """Classify one pydantic ``ValidationError`` into a recovery key.
+
+    Pure and side-effect free: reads only each error's ``loc``, ``type``, and
+    message. The kernel's validation-recovery hook calls this on a
+    pre-execution rejection and renders the matching authored section from
+    ``recovery.md``. Must return a key in :data:`RECOVERY_KEYS`.
+
+    Classification order matters and mirrors the validation layers:
+
+    - the ``edits`` field itself not being a list (after string decoding);
+    - digest pattern failures anywhere under ``edits`` (the highest-value
+      recovery: re-read the file, never invent a digest);
+    - replacement shape errors under a ``replacements`` path;
+    - record-level shape violations (wrong fields for the record's ``kind``,
+      including the unliftable legacy flat record);
+    - other missing-required failures (e.g. ``artifact_id``);
+    - everything else falls back to the original-summary section.
+    """
+
+    if not isinstance(exc, ValidationError):
+        return "unknown_or_other"
+    for error in exc.errors():
+        loc = _loc_prefix(error)
+        msg = str(error.get("msg", ""))
+        error_type = str(error.get("type", ""))
+        if not loc:
+            continue
+        # The ``edits`` field itself (loc == ('edits',)) rejected as a
+        # non-list — nested record errors carry a deeper loc and must fall
+        # through to their own families.
+        if loc == ("edits",) and (
+            error_type in ("list_type", "iterable_type") or "valid list" in msg
+        ):
+            return "edits_not_array"
+        if "expected_sha256" in loc:
+            if error_type == "string_pattern_mismatch" or "pattern" in msg.lower():
+                return "digest_format"
+        if "replacements" in loc:
+            if (
+                error_type
+                in ("list_type", "iterable_type", "model_type", "model_attributes_type")
+                or "old_text" in msg
+                or "new_text" in msg
+                or error_type == "missing"
+            ):
+                return "replacement_shape"
+        if len(loc) >= 2 and loc[0] == "edits":
+            if error_type == "missing":
+                return "missing_required"
+            if error_type == "extra_forbidden":
+                return "record_shape"
+            if "Inputs" in msg or "Updates require" in msg or "Deletes require" in msg or (
+                "Creates require" in msg
+            ):
+                return "record_shape"
+        if error_type == "missing":
+            return "missing_required"
+    return "unknown_or_other"
 
 
 @dataclass(frozen=True)
