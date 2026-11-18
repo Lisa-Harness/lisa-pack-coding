@@ -1,7 +1,7 @@
 """The coding pack's sandbox-floor contribution.
 
 The pack's tools run contained (checks, preparation, commit verification)
-inside owned worktrees under ``resolve_worktree_parent`` — a *runtime-derived*
+inside owned worktrees under ``ensure_worktree_parent`` — a *runtime-derived*
 path the harness cannot know when authoring the session floor. The
 contribution is implementation-agnostic: it names paths and postures, and
 each sandbox implementation validates what it can enforce. This module
@@ -21,11 +21,11 @@ toolchain the session declares, its cache paths land in the floor
 automatically.
 
 The contribution is data derived from this pack's own validated config —
-the same ``CodingPackConfig`` and the same ``resolve_worktree_parent`` the
-worktree tools use — so a change in resolution automatically flows into
-the floor. No side effects beyond existence checks on the cache roots
-(floor ``rw`` binds have no existence filter; a missing source directory
-would abort every sandboxed run).
+the same ``CodingPackConfig`` and ``ensure_worktree_parent`` the worktree
+tools use — so a change in resolution automatically flows into the floor.
+The worktree parent is created before it is contributed because floor
+``rw`` binds have no existence filter. Cache roots have no creation side
+effect; only roots that already exist are contributed.
 """
 
 from __future__ import annotations
@@ -127,18 +127,18 @@ def floor_contribution(
     floor fails at recipe time with a precise cause — a clearer signal
     than refusing to load the pack at all.
 
-    Path expansion mirrors ``resolve_worktree_parent``: ``~`` expands and
-    the parent resolves so the bind matches the real path the sandbox
-    implementation sees.
+    Path expansion mirrors ``ensure_worktree_parent``: ``~`` expands, the
+    parent resolves, and a missing parent is created so the bind source exists
+    before the sandbox implementation sees it.
     ``context`` carries the kernel's :class:`SandboxFloorContext` fields
     (``data_dir``, ``workspace_root``) as a mapping.
     """
     config = CodingPackConfig.model_validate(dict(pack_config))
     data_dir = str(context.get("data_dir") or "")
     source_root = config.resolve_workspace_root()
-    worktree_parent = config.resolve_worktree_parent(
+    worktree_parent = config.ensure_worktree_parent(
         data_dir=data_dir, source_root=source_root
-    ).resolve()
+    )
     paths = {str(worktree_parent): "rw"}
     # The workspace itself stays writable for in-place fixes and format
     # checks only when it is outside the worktree parent; nested paths with

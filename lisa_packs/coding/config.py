@@ -242,6 +242,20 @@ class CodingPackConfig(BaseModel):
             return default
         return source.parent / ".lisa-worktrees"
 
+    def ensure_worktree_parent(self, *, data_dir: str, source_root: Path) -> Path:
+        """Resolve and create the worktree parent outside the source workspace."""
+
+        source = source_root.resolve()
+        parent = self.resolve_worktree_parent(
+            data_dir=data_dir, source_root=source
+        ).resolve()
+        if parent.is_relative_to(source):
+            raise ValueError(
+                "Resolved worktree directory must be outside the source workspace."
+            )
+        parent.mkdir(parents=True, exist_ok=True)
+        return parent
+
     def preparation_recipe(self, recipe_id: str | None) -> CodingPreparationRecipe:
         """Return an explicitly or uniquely selected finite preparation recipe."""
 

@@ -1,7 +1,7 @@
 """Tests for the coding pack's sandbox-floor contribution factory.
 
 The contribution must derive its paths from the same config resolution the
-worktree tools use (``resolve_worktree_parent`` + ``resolve_workspace_root``),
+worktree tools use (``ensure_worktree_parent`` + ``resolve_workspace_root``),
 so the floor and the actual worktree location can never drift apart.
 """
 
@@ -28,10 +28,32 @@ async def test_contribution_declares_direct_write_worktree_paths(
     assert contribution["execution"] == "sandbox"
     assert contribution["persistence"] == "direct-write"
     expected_parent = str((tmp_path / "data" / "git-worktrees" / "source").resolve())
+    assert Path(expected_parent).is_dir()
     assert contribution["paths"] == {
         expected_parent: "rw",
         str(repo.root.resolve()): "rw",
     }
+
+
+@pytest.mark.asyncio
+async def test_contribution_creates_configured_worktree_parent(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "t").mkdir(parents=True, exist_ok=True)
+    repo = await git_repo(tmp_path / "t")
+    configured_parent = tmp_path / "configured-trees"
+
+    contribution = floor_contribution(
+        {
+            "workspace_root": str(repo.root),
+            "worktree_dir": str(configured_parent),
+        },
+        {"data_dir": str(tmp_path / "data"), "workspace_root": str(repo.root)},
+    )
+
+    assert contribution is not None
+    assert configured_parent.is_dir()
+    assert contribution["paths"][str(configured_parent.resolve())] == "rw"
 
 
 @pytest.mark.asyncio
@@ -192,6 +214,26 @@ async def test_contribution_omits_workspace_when_inside_worktree_parent(
     contribution = floor_contribution(pack_config, context)
     assert contribution is not None
     assert contribution["paths"] == {str(repo.root.parent): "rw"}
+
+
+@pytest.mark.asyncio
+async def test_contribution_rejects_missing_worktree_parent_inside_source(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "t").mkdir(parents=True, exist_ok=True)
+    repo = await git_repo(tmp_path / "t")
+    configured_parent = repo.root / "trees"
+
+    with pytest.raises(ValueError, match="outside the source workspace"):
+        floor_contribution(
+            {
+                "workspace_root": str(repo.root),
+                "worktree_dir": str(configured_parent),
+            },
+            {"data_dir": str(tmp_path / "data"), "workspace_root": str(repo.root)},
+        )
+
+    assert not configured_parent.exists()
 
 
 @pytest.mark.asyncio

@@ -315,8 +315,8 @@ otherwise the local branch worktrees start from and stay rebased onto),
 `<source-parent>/.lisa-patches`; must be absolute and outside the source),
 `worktree_dir` (empty → `<data-dir>/git-worktrees/<workspace-name>` from the
 host-injected data dir; must be absolute; the resolved worktree directory must
-stay outside the source), `preparation_recipes` (tuple of the recipe fields
-documented above), and the byte/line/result bounds
+stay outside the source and is created automatically), `preparation_recipes`
+(tuple of the recipe fields documented above), and the byte/line/result bounds
 (`max_file_bytes` 512 000, `max_read_lines` 400, `max_patch_bytes` 200 000,
 `max_command_output_bytes` 100 000, `git_timeout_seconds` 60, …).
 
@@ -404,11 +404,6 @@ resources:
             execution: sandbox
             persistence: direct-write
             network: deny
-            paths:
-              # Worktree parent (default <data-dir>/git-worktrees/<workspace-name>
-              # unless worktree_dir is set) — grant rw so checks can write there.
-              /home/you/.lisa/git-worktrees: rw
-              /home/you/yourcode: rw
 routing:
   # Optional: route natural-language shell intent elsewhere; this pack is
   # tool-only and has no start_mode.
@@ -417,7 +412,10 @@ routing:
 
 With this plan, a change is gated: `coding_apply_patch` bumps the revision and
 clears check results; `coding_commit` reruns `format` and both required checks
-on the candidate tree and refuses unless they pass.
+on the candidate tree and refuses unless they pass. The coding pack creates
+the resolved worktree parent and contributes its `rw` bind, plus the
+`workspace_root` bind, to the authored bwrap floor at session assembly. No
+manual `paths` entry is needed for either path.
 
 A required check and a faster feedback check can share one command when the
 underlying selector supports a scope flag: configure an optional check
