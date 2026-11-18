@@ -186,9 +186,11 @@ Revision-pinned reads survive edits and carry an anchor
 `history_snapshot` keeps one line per live artifact (branch, revision, dirty
 paths) in the next turn's `## Pack State` section once results fold; it says `unknown` rather than
 `clean` when `git status` fails. Diffs between SHAs (`branch`, `trees`,
-`commit`) stay resident across edits, since their endpoints are immutable. `coding_execute` sets
-`working_set_tokens: 80000`. The eval `tests/evals/test_history_semantics.py`
-and the `tests/e2e/history_fold.scenario.yml` scenario pin this table.
+`commit`) stay resident across edits, since their endpoints are immutable.
+`coding_execute` intentionally leaves `working_set_tokens` unset, so
+compaction uses the kernel's model/envelope-derived thresholds instead of an
+80K override. The eval `tests/evals/test_history_semantics.py` and the
+`tests/e2e/history_fold.scenario.yml` scenario pin this table.
 
 ## The bounded-execution model
 
