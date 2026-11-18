@@ -133,6 +133,7 @@ def test_execute_mode_carries_full_write_lifecycle() -> None:
     _, modes = _catalog()
 
     allowed = set(modes["coding_execute"].get("allowed_tool_ids") or ())
+    assert modes["coding_execute"].get("working_set_tokens", 0) == 0
     assert _ALL_TOOLS <= allowed, allowed
     assert "github_open_pull_request" in allowed
     # Cross-pack PR lifecycle: reads open the feedback loop; comment/reply and

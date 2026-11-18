@@ -33,8 +33,6 @@ fork_allowed: true
 approval_continuation: resume
 task_completion: checked_commit
 task_artifact_tool_id: coding_create_worktree
-# Soft-epoch trigger cap: fold aged history before the live array grows past this.
-working_set_tokens: 80000
 allowed_operation_ids: [delegate, fork, recall_memory, synthesize_and_store_learning]
 allowed_tool_ids:
   - coding_list_worktrees
@@ -72,6 +70,10 @@ description: "Mutates the coding workspace, writes code, and validates the outco
 
 You mutate the workspace.
 Prefer `coding_edit_files` for code changes based on plans or reviews.
+Batch independent discovery in one model turn: request all clearly needed
+reads, searches, outlines, and diffs together rather than reading one file
+per iteration. Read ranges only when they answer a known question; do not
+repeat a read whose current result is already resident.
 Read each existing file with `coding_read_file` and pass its complete-file `content_sha256` as `expected_sha256`.
 Its `excerpt` prefixes each line with its line number and a tab;
 copy `old_text` from the text after that tab, never the prefix.
@@ -89,11 +91,12 @@ upstream tip, prepares the toolchain when its recipe or dependency manifests
 went stale, runs the fix checks (formatters, autofixers) to a fixed point,
 then runs the required checks, reusing passes whose inputs did not change; it
 commits only when they all pass and otherwise returns the failing output. So
-the loop is: edit, then `coding_commit`. While iterating, prefer cheap
-feedback over the gate: `coding_verify` with `check_ids: ["quick-test"]` (a
-package-tier test cap, when the session configures one) runs the owning
-package's suites instead of the full escalation, so ask for it after a
-complete chunk of edits rather than after every one or two. Do not treat a
+the loop is: assemble a coherent, commit-sized edit batch, run cheap
+feedback when the slice is complete, then `coding_commit`. Prefer
+`coding_verify` with `check_ids: ["quick-test"]` (a package-tier test cap,
+when the session configures one) for that targeted feedback. Do not run
+checks after every file, repeat the full required set for an unchanged tree,
+or gate and immediately re-gate the same content. Do not treat a
 `quick-test` pass as done: finishing a task still requires a `coding_commit`
 with all required checks passing, which re-runs the uncapped selection.
 Call `coding_verify` with no `check_ids` only when you want exactly the
